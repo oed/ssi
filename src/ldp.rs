@@ -23,7 +23,7 @@ use crate::jwk::{Algorithm, OctetParams as JWKOctetParams, Params as JWKParams, 
 use crate::jws::Header;
 use crate::rdf::DataSet;
 use crate::urdna2015;
-use crate::vc::{LinkedDataProofOptions, Proof};
+use crate::vc::{Credential, LinkedDataProofOptions, Presentation, Proof, ProofPurpose};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -1706,4 +1706,159 @@ mod tests {
             .unwrap();
     }
     */
+
+    #[async_std::test]
+    async fn ed2020() {
+        // https://w3c-ccg.github.io/lds-ed25519-2020/#example-4
+        /*
+        let vmm: VerificationMethodMap = serde_json::from_value(serde_json::json!({
+          "id": "https://example.com/issuer/123#key-0",
+          "type": "Ed25519KeyPair2020",
+          "controller": "https://example.com/issuer/123",
+          "publicKeyMultibase": "zdbDmZLTWuEYYZNHFLKLoRkEX4sZykkSLNQLXvMUyMB1",
+          "privateKeyMultibase": "z47QbyJEDqmHTzsdg8xzqXD8gqKuLufYRrKWTmB7eAaWHG2EAsQ2GUyqRqWWYT15dGuag52Sf3j4hs2mu7w52mgps"
+        }))
+        .unwrap();
+        */
+        let issuer_document: Document =
+            serde_json::from_str(include_str!("../tests/lds-ed25519-2020-issuer0.jsonld")).unwrap();
+
+        let vc_str = include_str!("../tests/lds-ed25519-2020-vc0.jsonld");
+        let vc = Credential::from_json_unsigned(vc_str).unwrap();
+        let vp_str = include_str!("../tests/lds-ed25519-2020-vp0.jsonld");
+        let vp = Presentation::from_json_unsigned(vp_str).unwrap();
+
+        use crate::json_ld;
+        use crate::jsonld::{json_to_dataset, StaticLoader};
+        use futures::future::{BoxFuture, FutureExt};
+        use iref::{Iri, IriBuf};
+        use json::JsonValue;
+        use json_ld::{Loader, RemoteDocument};
+
+        struct ExampleResolver {
+            issuer_document: Document,
+        }
+        use crate::did::Document;
+        use crate::did::DIDURL;
+        use crate::did_resolve::{
+            ContentMetadata, DereferencingMetadata, DocumentMetadata, ResolutionInputMetadata,
+            ResolutionMetadata, ERROR_NOT_FOUND, TYPE_DID_LD_JSON,
+        };
+        #[async_trait]
+        impl DIDResolver for ExampleResolver {
+            async fn resolve(
+                &self,
+                did: &str,
+                _input_metadata: &ResolutionInputMetadata,
+            ) -> (
+                ResolutionMetadata,
+                Option<Document>,
+                Option<DocumentMetadata>,
+            ) {
+                // Return empty result here that allows DID URL dereferencing to proceed. The DID
+                // is resolved as part of DID URL dereferencing, but the DID document is not used.
+                if did == "https:" {
+                    let doc_meta = DocumentMetadata::default();
+                    let doc = Document::new(did);
+                    return (ResolutionMetadata::default(), Some(doc), Some(doc_meta));
+                }
+                (ResolutionMetadata::from_error(ERROR_NOT_FOUND), None, None)
+            }
+
+            async fn dereference(
+                &self,
+                did_url: &DIDURL,
+                input_metadata: &DereferencingInputMetadata,
+            ) -> Option<(DereferencingMetadata, Content, ContentMetadata)> {
+                match &did_url.to_string()[..] {
+                    "https://example.com/issuer/123" => Some((
+                        DereferencingMetadata {
+                            content_type: Some(TYPE_DID_LD_JSON.to_string()),
+                            ..Default::default()
+                        },
+                        Content::DIDDocument(self.issuer_document.clone()),
+                        ContentMetadata::default(),
+                    )),
+                    _ => None,
+                }
+            }
+        }
+
+        let sk_mb = "z47QbyJEDqmHTzsdg8xzqXD8gqKuLufYRrKWTmB7eAaWHG2EAsQ2GUyqRqWWYT15dGuag52Sf3j4hs2mu7w52mgps";
+        let sk_bytes = multibase::decode(sk_mb).unwrap().1;
+        dbg!(hex::encode(&sk_bytes));
+
+        let pk_mb = "zdbDmZLTWuEYYZNHFLKLoRkEX4sZykkSLNQLXvMUyMB1";
+        let pk_bytes = multibase::decode(pk_mb).unwrap().1;
+        dbg!(hex::encode(&pk_bytes));
+
+        let sk_jwk = JWK {
+            params: JWKParams::OKP(JWKOctetParams {
+                curve: "Ed25519".to_string(),
+                public_key: Base64urlUInt(sk_bytes[32..64].to_vec()),
+                private_key: Some(Base64urlUInt(sk_bytes[0..32].to_vec())),
+            }),
+            public_key_use: None,
+            key_operations: None,
+            algorithm: None,
+            key_id: None,
+            x509_url: None,
+            x509_certificate_chain: None,
+            x509_thumbprint_sha1: None,
+            x509_thumbprint_sha256: None,
+        };
+        assert_eq!(sk_bytes.len(), 64);
+        eprintln!("{}", serde_json::to_string(&sk_jwk).unwrap());
+
+        let issue_options = LinkedDataProofOptions {
+            verification_method: Some("https://example.com/issuer/123#key-0".to_string()),
+            proof_purpose: Some(ProofPurpose::AssertionMethod),
+            created: Some(Utc::now().with_nanosecond(0).unwrap()),
+            ..Default::default()
+        };
+        // reissue VC
+        let new_proof = Ed25519Signature2020
+            .sign(&vc, &issue_options, &sk_jwk)
+            .await
+            .unwrap();
+        println!("{}", serde_json::to_string(&new_proof).unwrap());
+
+        let resolver = ExampleResolver { issuer_document };
+
+        // check new VC proof and original proof
+        Ed25519Signature2020
+            .verify(&new_proof, &vc, &resolver)
+            .await
+            .unwrap();
+        let orig_proof = vc.proof.iter().flatten().next().unwrap();
+        Ed25519Signature2020
+            .verify(orig_proof, &vc, &resolver)
+            .await
+            .unwrap();
+
+        // re-generate VP proof
+        let vp_issue_options = LinkedDataProofOptions {
+            verification_method: Some("https://example.com/issuer/123#key-0".to_string()),
+            proof_purpose: Some(ProofPurpose::Authentication),
+            created: Some(Utc::now().with_nanosecond(0).unwrap()),
+            challenge: Some("123".to_string()),
+            ..Default::default()
+        };
+        let new_proof = Ed25519Signature2020
+            .sign(&vp, &vp_issue_options, &sk_jwk)
+            .await
+            .unwrap();
+        println!("{}", serde_json::to_string(&new_proof).unwrap());
+
+        // check new VP proof and original proof
+        Ed25519Signature2020
+            .verify(&new_proof, &vp, &resolver)
+            .await
+            .unwrap();
+        let orig_proof = vp.proof.iter().flatten().next().unwrap();
+        Ed25519Signature2020
+            .verify(orig_proof, &vp, &resolver)
+            .await
+            .unwrap();
+    }
 }
