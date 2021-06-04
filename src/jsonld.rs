@@ -126,6 +126,8 @@ pub const ESRS2020_EXTRA_CONTEXT: &str =
     "https://demo.spruceid.com/EcdsaSecp256k1RecoverySignature2020/esrs2020-extra-0.0.jsonld";
 pub const LDS_JWS2020_V1_CONTEXT: &str =
     "https://w3c-ccg.github.io/lds-jws2020/contexts/lds-jws2020-v1.json";
+pub const LDS_ED2020_V1_CONTEXT: &str =
+    "https://w3c-ccg.github.io/lds-ed25519-2020/contexts/lds-ed25519-2020-v1.json";
 pub const CITIZENSHIP_V1_CONTEXT: &str = "https://w3id.org/citizenship/v1";
 pub const VACCINATION_V1_CONTEXT: &str = "https://w3id.org/vaccination/v1";
 pub const TRACEABILITY_CONTEXT: &str = "https://w3id.org/traceability/v1";
@@ -197,6 +199,12 @@ lazy_static! {
         let iri = Iri::new(LDS_JWS2020_V1_CONTEXT).unwrap();
         RemoteDocument::new(doc, iri)
     };
+    pub static ref LDS_ED2020_V1_CONTEXT_DOCUMENT: RemoteDocument<JsonValue> = {
+        let jsonld = ssi_contexts::LDS_ED2020_V1;
+        let doc = json::parse(jsonld).unwrap();
+        let iri = Iri::new(LDS_ED2020_V1_CONTEXT).unwrap();
+        RemoteDocument::new(doc, iri)
+    };
     pub static ref CITIZENSHIP_V1_CONTEXT_DOCUMENT: RemoteDocument<JsonValue> = {
         let jsonld = ssi_contexts::CITIZENSHIP_V1;
         let doc = json::parse(jsonld).unwrap();
@@ -240,6 +248,7 @@ impl Loader for StaticLoader {
                 DIF_ESRS2020_CONTEXT => Ok(DIF_ESRS2020_CONTEXT_DOCUMENT.clone()),
                 ESRS2020_EXTRA_CONTEXT => Ok(ESRS2020_EXTRA_CONTEXT_DOCUMENT.clone()),
                 LDS_JWS2020_V1_CONTEXT => Ok(LDS_JWS2020_V1_CONTEXT_DOCUMENT.clone()),
+                LDS_ED2020_V1_CONTEXT => Ok(LDS_ED2020_V1_CONTEXT_DOCUMENT.clone()),
                 CITIZENSHIP_V1_CONTEXT => Ok(CITIZENSHIP_V1_CONTEXT_DOCUMENT.clone()),
                 VACCINATION_V1_CONTEXT => Ok(VACCINATION_V1_CONTEXT_DOCUMENT.clone()),
                 TRACEABILITY_CONTEXT => Ok(TRACEABILITY_CONTEXT_DOCUMENT.clone()),

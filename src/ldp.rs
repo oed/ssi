@@ -127,6 +127,7 @@ impl ProofPreparation {
         match self.proof.type_.as_str() {
             "RsaSignature2018" => RsaSignature2018.complete(self, signature).await,
             "Ed25519Signature2018" => Ed25519Signature2018.complete(self, signature).await,
+            "Ed25519Signature2020" => Ed25519Signature2020.complete(self, signature).await,
             "Ed25519BLAKE2BDigestSize20Base58CheckEncodedSignature2021" => {
                 Ed25519BLAKE2BDigestSize20Base58CheckEncodedSignature2021
                     .complete(self, signature)
@@ -206,7 +207,12 @@ impl LinkedDataProofs {
                             return SolanaSignature2021.sign(document, options, &key).await;
                         }
                     }
-                    return Ed25519Signature2018.sign(document, options, &key).await;
+                    let use_2020 = true; // TODO
+                    if use_2020 {
+                        return Ed25519Signature2020.sign(document, options, &key).await;
+                    } else {
+                        return Ed25519Signature2018.sign(document, options, &key).await;
+                    }
                 }
                 _ => {
                     return Err(Error::ProofTypeNotImplemented);
@@ -303,9 +309,16 @@ impl LinkedDataProofs {
                             .await;
                     }
                 }
-                return Ed25519Signature2018
-                    .prepare(document, options, public_key)
-                    .await;
+                let use_2020 = true; // TODO
+                if use_2020 {
+                    return Ed25519Signature2020
+                        .prepare(document, options, public_key)
+                        .await;
+                } else {
+                    return Ed25519Signature2018
+                        .prepare(document, options, public_key)
+                        .await;
+                }
             }
             Algorithm::ES256 => {
                 if let Some(ref vm) = options.verification_method {
@@ -373,6 +386,7 @@ impl LinkedDataProofs {
         match proof.type_.as_str() {
             "RsaSignature2018" => RsaSignature2018.verify(proof, document, resolver).await,
             "Ed25519Signature2018" => Ed25519Signature2018.verify(proof, document, resolver).await,
+            "Ed25519Signature2020" => Ed25519Signature2020.verify(proof, document, resolver).await,
             "Ed25519BLAKE2BDigestSize20Base58CheckEncodedSignature2021" => {
                 Ed25519BLAKE2BDigestSize20Base58CheckEncodedSignature2021
                     .verify(proof, document, resolver)
@@ -414,29 +428,46 @@ pub async fn resolve_key(
     resolver: &dyn DIDResolver,
 ) -> Result<JWK, Error> {
     let vm = resolve_vm(verification_method, resolver).await?;
-    if let Some(pk_jwk) = vm.public_key_jwk {
-        if vm.public_key_base58.is_some() {
-            // https://w3c.github.io/did-core/#verification-material
-            // "expressing key material in a verification method using both publicKeyJwk and
-            // publicKeyBase58 at the same time is prohibited."
-            return Err(Error::MultipleKeyMaterial);
-        }
-        return Ok(pk_jwk);
-    }
-    if let Some(pk_bs58) = vm.public_key_base58 {
-        return jwk_from_public_key_base58(&pk_bs58, &vm.type_);
-    }
-    Err(Error::MissingKey)
+    vmm_to_jwk(&vm)
 }
 
-fn jwk_from_public_key_base58(pk_bs58: &str, vm_type: &str) -> Result<JWK, Error> {
-    let pk_bytes = bs58::decode(&pk_bs58).into_vec()?;
-    let params = match vm_type {
+fn vmm_to_jwk(vm: &VerificationMethodMap) -> Result<JWK, Error> {
+    let pk_multibase_opt = match vm.property_set {
+        Some(ref props) => match props.get("publicKeyMultibase") {
+            Some(Value::String(string)) => Some(string.clone()),
+            Some(Value::Null) => None,
+            Some(_) => return Err(Error::ExpectedStringPublicKeyMultibase),
+            None => None,
+        },
+        None => None,
+    };
+    // Convert non-JWK formats to JWK.
+    let pk_bytes = match (
+        vm.public_key_jwk.as_ref(),
+        vm.public_key_base58.as_ref(),
+        pk_multibase_opt,
+    ) {
+        (None, None, None) => return Err(Error::MissingKey),
+        (Some(pk_jwk), None, None) => return Ok(pk_jwk.clone()),
+        (None, Some(pk_b58), None) => bs58::decode(&pk_b58).into_vec()?,
+        (None, None, Some(pk_mb)) => multibase::decode(pk_mb)?.1,
+        // https://www.w3.org/TR/did-core/#verification-material
+        // A verification method MUST NOT contain multiple verification material properties for the
+        // same material.
+        _ => return Err(Error::MultipleKeyMaterial),
+    };
+    let params = match &vm.type_[..] {
         "Ed25519VerificationKey2018" => JWKParams::OKP(JWKOctetParams {
             curve: "Ed25519".to_string(),
             public_key: Base64urlUInt(pk_bytes),
             private_key: None,
         }),
+        "Ed25519VerificationKey2020" => JWKParams::OKP(JWKOctetParams {
+            curve: "Ed25519".to_string(),
+            public_key: Base64urlUInt(pk_bytes),
+            private_key: None,
+        }),
+        // TODO: support other key types
         _ => return Err(Error::UnsupportedKeyType),
     };
     let jwk = JWK {
@@ -530,6 +561,33 @@ async fn sign_proof(
     Ok(proof)
 }
 
+async fn sign_nojws(
+    document: &(dyn LinkedDataDocument + Sync),
+    options: &LinkedDataProofOptions,
+    key: &JWK,
+    type_: &str,
+    algorithm: Algorithm,
+) -> Result<Proof, Error> {
+    if let Some(key_algorithm) = key.algorithm {
+        if key_algorithm != algorithm {
+            return Err(Error::AlgorithmMismatch);
+        }
+    }
+    let mut proof = Proof {
+        proof_purpose: options.proof_purpose.clone(),
+        verification_method: options.verification_method.clone(),
+        created: Some(options.created.unwrap_or_else(now_ms)),
+        domain: options.domain.clone(),
+        challenge: options.challenge.clone(),
+        ..Proof::new(type_)
+    };
+    let message = to_jws_payload(document, &proof).await?;
+    let sig = crate::jws::sign_bytes(algorithm, &message, &key)?;
+    let sig_multibase = multibase::encode(multibase::Base::Base58Btc, sig);
+    proof.proof_value = Some(sig_multibase);
+    Ok(proof)
+}
+
 async fn prepare(
     document: &(dyn LinkedDataDocument + Sync),
     options: &LinkedDataProofOptions,
@@ -593,6 +651,27 @@ async fn verify(
     let key = resolve_key(&verification_method, resolver).await?;
     let message = to_jws_payload(document, proof).await?;
     crate::jws::detached_verify(&jws, &message, &key)?;
+    Ok(())
+}
+
+async fn verify_nojws(
+    proof: &Proof,
+    document: &(dyn LinkedDataDocument + Sync),
+    resolver: &dyn DIDResolver,
+    algorithm: Algorithm,
+) -> Result<(), Error> {
+    let proof_value = proof
+        .proof_value
+        .as_ref()
+        .ok_or(Error::MissingProofSignature)?;
+    let verification_method = proof
+        .verification_method
+        .as_ref()
+        .ok_or(Error::MissingVerificationMethod)?;
+    let key = resolve_key(&verification_method, resolver).await?;
+    let message = to_jws_payload(document, proof).await?;
+    let (_base, sig) = multibase::decode(proof_value)?;
+    crate::jws::verify_bytes(algorithm, &message, &key, &sig)?;
     Ok(())
 }
 
@@ -672,6 +751,52 @@ impl ProofSuite for Ed25519Signature2018 {
         signature: &str,
     ) -> Result<Proof, Error> {
         complete(preparation, signature).await
+    }
+}
+
+pub struct Ed25519Signature2020;
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+impl ProofSuite for Ed25519Signature2020 {
+    async fn sign(
+        &self,
+        document: &(dyn LinkedDataDocument + Sync),
+        options: &LinkedDataProofOptions,
+        key: &JWK,
+    ) -> Result<Proof, Error> {
+        sign_nojws(
+            document,
+            options,
+            key,
+            "Ed25519Signature2020",
+            Algorithm::EdDSA,
+        )
+        .await
+    }
+    async fn verify(
+        &self,
+        proof: &Proof,
+        document: &(dyn LinkedDataDocument + Sync),
+        resolver: &dyn DIDResolver,
+    ) -> Result<(), Error> {
+        verify_nojws(proof, document, resolver, Algorithm::EdDSA).await
+    }
+    async fn prepare(
+        &self,
+        document: &(dyn LinkedDataDocument + Sync),
+        options: &LinkedDataProofOptions,
+        public_key: &JWK,
+    ) -> Result<ProofPreparation, Error> {
+        // TODO
+        Err(Error::NotImplemented)
+    }
+    async fn complete(
+        &self,
+        preparation: ProofPreparation,
+        signature: &str,
+    ) -> Result<Proof, Error> {
+        // TODO
+        Err(Error::NotImplemented)
     }
 }
 
