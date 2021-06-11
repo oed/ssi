@@ -5,6 +5,7 @@ use std::str::FromStr;
 use async_trait::async_trait;
 use chrono::prelude::*;
 
+const MULTICODEC_ED25519_PREFIX: [u8; 2] = [0xed, 0x01];
 const EDPK_PREFIX: [u8; 4] = [13, 15, 37, 217];
 const EDSIG_PREFIX: [u8; 5] = [9, 245, 205, 134, 18];
 const SPSIG_PREFIX: [u8; 5] = [13, 115, 101, 19, 63];
@@ -462,11 +463,19 @@ fn vmm_to_jwk(vm: &VerificationMethodMap) -> Result<JWK, Error> {
             public_key: Base64urlUInt(pk_bytes),
             private_key: None,
         }),
-        "Ed25519VerificationKey2020" => JWKParams::OKP(JWKOctetParams {
-            curve: "Ed25519".to_string(),
-            public_key: Base64urlUInt(pk_bytes),
-            private_key: None,
-        }),
+        "Ed25519VerificationKey2020" => {
+            if pk_bytes.len() != 34 {
+                return Err(Error::MultibaseKeyLength(34, pk_bytes.len()));
+            }
+            if &pk_bytes[0..2] != MULTICODEC_ED25519_PREFIX {
+                return Err(Error::MultibaseKeyPrefix);
+            }
+            JWKParams::OKP(JWKOctetParams {
+                curve: "Ed25519".to_string(),
+                public_key: Base64urlUInt(pk_bytes[2..].to_owned()),
+                private_key: None,
+            })
+        }
         // TODO: support other key types
         _ => return Err(Error::UnsupportedKeyType),
     };
@@ -1715,8 +1724,8 @@ mod tests {
           "id": "https://example.com/issuer/123#key-0",
           "type": "Ed25519KeyPair2020",
           "controller": "https://example.com/issuer/123",
-          "publicKeyMultibase": "zdbDmZLTWuEYYZNHFLKLoRkEX4sZykkSLNQLXvMUyMB1",
-          "privateKeyMultibase": "z47QbyJEDqmHTzsdg8xzqXD8gqKuLufYRrKWTmB7eAaWHG2EAsQ2GUyqRqWWYT15dGuag52Sf3j4hs2mu7w52mgps"
+          "publicKeyMultibase": "z6Mkf5rGMoatrSj1f4CyvuHBeXJELe9RPdzo2PKGNCKVtZxP",
+          "privateKeyMultibase": "zrv3kJcnBP1RpYmvNZ9jcYpKBZg41iSobWxSg3ix2U7Cp59kjwQFCT4SZTgLSL3HP8iGMdJs3nedjqYgNn6ZJmsmjRm"
         }))
         .unwrap();
         */
@@ -1784,13 +1793,19 @@ mod tests {
             }
         }
 
-        let sk_mb = "z47QbyJEDqmHTzsdg8xzqXD8gqKuLufYRrKWTmB7eAaWHG2EAsQ2GUyqRqWWYT15dGuag52Sf3j4hs2mu7w52mgps";
-        let sk_bytes = multibase::decode(sk_mb).unwrap().1;
-        dbg!(hex::encode(&sk_bytes));
+        let sk_hex = "9b937b81322d816cfab9d5a3baacc9b2a5febe4b149f126b3630f93a29527017095f9a1a595dde755d82786864ad03dfa5a4fbd68832566364e2b65e13cc9e44";
+        let sk_bytes = hex::decode(sk_hex).unwrap();
+        let sk_bytes_mc = [vec![0x80, 0x26], sk_bytes.clone()].concat();
+        let sk_mb = multibase::encode(multibase::Base::Base58Btc, &sk_bytes_mc);
+        dbg!(&sk_mb);
 
-        let pk_mb = "zdbDmZLTWuEYYZNHFLKLoRkEX4sZykkSLNQLXvMUyMB1";
-        let pk_bytes = multibase::decode(pk_mb).unwrap().1;
-        dbg!(hex::encode(&pk_bytes));
+        let pk_hex = "095f9a1a595dde755d82786864ad03dfa5a4fbd68832566364e2b65e13cc9e44";
+        let pk_bytes = hex::decode(pk_hex).unwrap();
+        let pk_bytes_mc = [vec![0xed, 0x01], pk_bytes.clone()].concat();
+        let pk_mb = multibase::encode(multibase::Base::Base58Btc, &pk_bytes_mc);
+        dbg!(&pk_mb);
+
+        assert_eq!(&sk_bytes[32..64], &pk_bytes);
 
         let sk_jwk = JWK {
             params: JWKParams::OKP(JWKOctetParams {
@@ -1860,5 +1875,8 @@ mod tests {
             .verify(orig_proof, &vp, &resolver)
             .await
             .unwrap();
+
+        // trigger failure to see the output above
+        todo!();
     }
 }
