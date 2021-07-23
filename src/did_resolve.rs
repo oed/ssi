@@ -12,20 +12,22 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::TryFrom;
 
 // https://w3c-ccg.github.io/did-resolution/
-
 use crate::did::{DIDMethod, DIDParameters, Document, Resource, ServiceEndpoint, DIDURL};
 use crate::error::Error;
 use crate::jsonld::DID_RESOLUTION_V1_CONTEXT;
 use crate::one_or_many::OneOrMany;
 
 pub const TYPE_JSON: &str = "application/json";
-pub const TYPE_LD_JSON: &str = "application/did+json";
+pub const TYPE_LD_JSON: &str = "application/ld+json";
+pub const TYPE_DID_JSON: &str = "application/did+json";
 pub const TYPE_DID_LD_JSON: &str = "application/did+ld+json";
-pub const ERROR_INVALID_DID: &str = "invalid-did";
+pub const TYPE_URL: &str = "text/url";
+pub const ERROR_INVALID_DID: &str = "invalidDid";
+pub const ERROR_INVALID_DID_URL: &str = "invalidDidUrl";
 pub const ERROR_UNAUTHORIZED: &str = "unauthorized";
-pub const ERROR_NOT_FOUND: &str = "not-found";
-pub const ERROR_METHOD_NOT_SUPPORTED: &str = "method-not-supported";
-pub const ERROR_REPRESENTATION_NOT_SUPPORTED: &str = "representation-not-supported";
+pub const ERROR_NOT_FOUND: &str = "notFound";
+pub const ERROR_METHOD_NOT_SUPPORTED: &str = "methodNotSupported";
+pub const ERROR_REPRESENTATION_NOT_SUPPORTED: &str = "representationNotSupported";
 pub const TYPE_DID_RESOLUTION: &'static str =
     "application/ld+json;profile=\"https://w3id.org/did-resolution\";charset=utf-8";
 
@@ -42,6 +44,7 @@ pub enum Metadata {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ResolutionInputMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub accept: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version_id: Option<String>,
@@ -83,6 +86,7 @@ pub struct DocumentMetadata {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct DereferencingInputMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub accept: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service_type: Option<String>,
@@ -248,6 +252,8 @@ pub trait DIDResolver: Sync {
                 }
             },
         };
+        // Assume JSON-LD DID document
+        res_meta.content_type = Some(TYPE_DID_LD_JSON.to_string());
         (res_meta, doc_representation, doc_meta)
     }
 
@@ -282,9 +288,9 @@ pub async fn dereference(
 ) -> (DereferencingMetadata, Content, ContentMetadata) {
     let mut did_url = match DIDURL::try_from(did_url_str.to_string()) {
         Ok(did_url) => did_url,
-        Err(error) => {
+        Err(_error) => {
             return (
-                DereferencingMetadata::from(error),
+                DereferencingMetadata::from_error(ERROR_INVALID_DID_URL),
                 Content::Null,
                 ContentMetadata::default(),
             );
@@ -308,25 +314,23 @@ pub async fn dereference(
     let (did_doc_res_meta, did_doc_opt, did_doc_meta_opt) = resolver
         .resolve(&did_url.did, &did_res_input_metadata)
         .await;
-    let (did_doc, did_doc_meta) = match (did_doc_opt, did_doc_meta_opt) {
-        (Some(doc), Some(meta)) if did_doc_res_meta.error.as_deref() != Some(ERROR_NOT_FOUND) => {
-            (doc, meta)
-        }
-        _ => {
-            return (
-                DereferencingMetadata::from(Error::ResourceNotFound(did_url.did.to_string())),
-                Content::Null,
-                ContentMetadata::default(),
-            );
-        }
-    };
-    if let Some(error) = did_doc_res_meta.error {
+    if let Some(ref error) = did_doc_res_meta.error {
         return (
             DereferencingMetadata::from_error(&error),
             Content::Null,
             ContentMetadata::default(),
         );
     }
+    let (did_doc, did_doc_meta) = match (did_doc_opt, did_doc_meta_opt) {
+        (Some(doc), Some(meta)) => (doc, meta),
+        _ => {
+            return (
+                DereferencingMetadata::from_error(ERROR_NOT_FOUND),
+                Content::Null,
+                ContentMetadata::default(),
+            );
+        }
+    };
     // 2
     let fragment = did_url.fragment.take();
     let (deref_meta, content, content_meta) = dereference_primary_resource(
@@ -438,7 +442,10 @@ async fn dereference_primary_resource(
             };
         // 1.3
         return (
-            DereferencingMetadata::default(),
+            DereferencingMetadata {
+                content_type: Some(TYPE_URL.to_string()),
+                ..Default::default()
+            },
             Content::URL(output_service_endpoint_url),
             ContentMetadata::default(),
         );
@@ -446,8 +453,15 @@ async fn dereference_primary_resource(
     // 2
     if did_url.path_abempty.is_empty() && did_url.query.is_none() {
         // 2.1
+        // Add back contentType, since the resolve function does not include it, but we need
+        // it to dereference the secondary resource.
+        // TODO: detect non-JSON-LD DID documents
+        let deref_meta = DereferencingMetadata {
+            content_type: Some(TYPE_DID_LD_JSON.to_string()),
+            ..DereferencingMetadata::from(res_meta.clone())
+        };
         return (
-            DereferencingMetadata::from(res_meta.clone()),
+            deref_meta,
             Content::DIDDocument(did_doc),
             ContentMetadata::default(),
         );
@@ -487,7 +501,17 @@ async fn dereference_secondary_resource(
     let content_type = deref_meta.content_type.as_ref().map(String::as_str);
     // 1
     match content {
-        Content::DIDDocument(ref doc) if content_type == Some(TYPE_DID_LD_JSON) => {
+        // https://www.w3.org/TR/did-core/#application-did-json
+        //   "Fragment identifiers used with application/did+json are treated according to the
+        //   rules defined in § Fragment."
+        //   https://www.w3.org/TR/did-core/#fragment
+        // TODO: use actual JSON-LD fragment dereferencing
+        // https://www.w3.org/TR/did-core/#application-did-ld-json
+        //   Fragment identifiers used with application/did+ld+json are treated according to the
+        //   rules associated with the JSON-LD 1.1: application/ld+json media type [JSON-LD11].
+        Content::DIDDocument(ref doc)
+            if content_type == Some(TYPE_DID_LD_JSON) || content_type == Some(TYPE_DID_JSON) =>
+        {
             // put the fragment back in the URL
             did_url.fragment.replace(fragment);
             // 1.1
@@ -505,7 +529,14 @@ async fn dereference_secondary_resource(
                 }
             };
             return (
-                DereferencingMetadata::default(),
+                DereferencingMetadata {
+                    content_type: Some(String::from(if content_type == Some(TYPE_DID_LD_JSON) {
+                        TYPE_LD_JSON
+                    } else {
+                        TYPE_JSON
+                    })),
+                    ..Default::default()
+                },
                 Content::Object(object),
                 ContentMetadata::default(),
             );
@@ -679,6 +710,7 @@ impl DIDResolver for HTTPDIDResolver {
         let client = Client::builder().build::<_, hyper::Body>(https);
         let request = match Request::get(uri)
             .header("Accept", TYPE_DID_RESOLUTION)
+            .header("User-Agent", crate::USER_AGENT)
             .body(hyper::Body::default())
         {
             Ok(req) => req,
@@ -759,7 +791,10 @@ impl DIDResolver for HTTPDIDResolver {
                         }
                     };
                 if let Some(meta) = result.did_resolution_metadata {
-                    res_meta = meta
+                    res_meta = meta;
+                    // https://www.w3.org/TR/did-core/#did-resolution-metadata
+                    // contentType - "MUST NOT be present if the resolve function was called"
+                    res_meta.content_type = None;
                 };
                 doc_opt = result.did_document;
                 doc_meta_opt = result.did_document_metadata;
@@ -899,7 +934,7 @@ impl DIDResolver for HTTPDIDResolver {
         }
         .unwrap_or_else(|| "".to_string());
         match &content_type[..] {
-            TYPE_DID_LD_JSON => {
+            TYPE_DID_LD_JSON | TYPE_DID_JSON => {
                 let doc: Document = match serde_json::from_slice(&deref_result_bytes) {
                     Ok(result) => result,
                     Err(err) => {

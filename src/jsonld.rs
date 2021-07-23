@@ -132,6 +132,7 @@ pub const W3ID_ED2020_V1_CONTEXT: &str = "https://w3id.org/security/suites/ed255
 pub const CITIZENSHIP_V1_CONTEXT: &str = "https://w3id.org/citizenship/v1";
 pub const VACCINATION_V1_CONTEXT: &str = "https://w3id.org/vaccination/v1";
 pub const TRACEABILITY_CONTEXT: &str = "https://w3id.org/traceability/v1";
+pub const EIP712SIG_V0_1_CONTEXT: &str = "https://demo.spruceid.com/ld/eip712sig-2021/v0.1.jsonld";
 
 lazy_static! {
     pub static ref CREDENTIALS_V1_CONTEXT_DOCUMENT: RemoteDocument<JsonValue> = {
@@ -230,6 +231,12 @@ lazy_static! {
         let iri = Iri::new(TRACEABILITY_CONTEXT).unwrap();
         RemoteDocument::new(doc, iri)
     };
+    pub static ref EIP712SIG_V0_1_CONTEXT_DOCUMENT: RemoteDocument<JsonValue> = {
+        let jsonld = ssi_contexts::EIP712SIG_V0_1;
+        let doc = json::parse(jsonld).unwrap();
+        let iri = Iri::new(EIP712SIG_V0_1_CONTEXT).unwrap();
+        RemoteDocument::new(doc, iri)
+    };
 }
 
 pub struct StaticLoader;
@@ -260,6 +267,7 @@ impl Loader for StaticLoader {
                 CITIZENSHIP_V1_CONTEXT => Ok(CITIZENSHIP_V1_CONTEXT_DOCUMENT.clone()),
                 VACCINATION_V1_CONTEXT => Ok(VACCINATION_V1_CONTEXT_DOCUMENT.clone()),
                 TRACEABILITY_CONTEXT => Ok(TRACEABILITY_CONTEXT_DOCUMENT.clone()),
+                EIP712SIG_V0_1_CONTEXT => Ok(EIP712SIG_V0_1_CONTEXT_DOCUMENT.clone()),
                 _ => {
                     eprintln!("unknown context {}", url);
                     Err(json_ld::ErrorCode::LoadingDocumentFailed.into())
@@ -1216,11 +1224,11 @@ pub fn object_to_rdf(
             }
         } else {
             // 11
-            let num_f64 = match num_f64 {
-                -0.0 => 0.0,
-                nonzero => nonzero,
+            let num = if num_f64 == -0.0 {
+                "0".to_string()
+            } else {
+                format!("{:.0}", num_f64)
             };
-            let num = format!("{:.0}", num_f64);
             value = JsonValue::String(num);
             if datatype == None {
                 datatype = Some("http://www.w3.org/2001/XMLSchema#integer");

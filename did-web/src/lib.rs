@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use ssi::did::{DIDMethod, Document};
 use ssi::did_resolve::{
     DIDResolver, DocumentMetadata, ResolutionInputMetadata, ResolutionMetadata, ERROR_INVALID_DID,
-    TYPE_DID_LD_JSON,
+    ERROR_NOT_FOUND, TYPE_DID_LD_JSON,
 };
+use ssi::USER_AGENT;
 
 // For testing, enable handling requests at localhost.
 #[cfg(test)]
@@ -60,7 +61,7 @@ impl DIDResolver for DIDWeb {
         Option<Document>,
         Option<DocumentMetadata>,
     ) {
-        let (res_meta, doc_data, doc_meta_opt) =
+        let (mut res_meta, doc_data, doc_meta_opt) =
             self.resolve_representation(did, input_metadata).await;
         let doc_opt = if doc_data.is_empty() {
             None
@@ -78,6 +79,9 @@ impl DIDResolver for DIDWeb {
                 }
             }
         };
+        // https://www.w3.org/TR/did-core/#did-resolution-metadata
+        // contentType - "MUST NOT be present if the resolve function was called"
+        res_meta.content_type = None;
         (res_meta, doc_opt, doc_meta_opt)
     }
 
@@ -91,7 +95,15 @@ impl DIDResolver for DIDWeb {
             Ok(url) => url,
         };
         // TODO: https://w3c-ccg.github.io/did-method-web/#in-transit-security
-        let client = match reqwest::Client::builder().build() {
+
+        let mut headers = reqwest::header::HeaderMap::new();
+
+        headers.insert(
+            "User-Agent",
+            reqwest::header::HeaderValue::from_static(USER_AGENT),
+        );
+
+        let client = match reqwest::Client::builder().default_headers(headers).build() {
             Ok(c) => c,
             Err(err) => {
                 return (
@@ -121,16 +133,20 @@ impl DIDResolver for DIDWeb {
                 )
             }
         };
-        match resp.error_for_status_ref() {
-            Ok(_) => (),
-            Err(err) => {
+        if let Err(err) = resp.error_for_status_ref() {
+            if err.status() == Some(reqwest::StatusCode::NOT_FOUND) {
                 return (
-                    ResolutionMetadata::from_error(&err.to_string()),
+                    ResolutionMetadata::from_error(ERROR_NOT_FOUND),
                     Vec::new(),
                     Some(DocumentMetadata::default()),
-                )
+                );
             }
-        };
+            return (
+                ResolutionMetadata::from_error(&err.to_string()),
+                Vec::new(),
+                Some(DocumentMetadata::default()),
+            );
+        }
         let doc_representation = match resp.bytes().await {
             Ok(bytes) => bytes.to_vec(),
             Err(err) => {
@@ -286,7 +302,7 @@ mod tests {
         let key_str = include_str!("../../tests/ed25519-2020-10-18.json");
         let key: JWK = serde_json::from_str(key_str).unwrap();
         let mut issue_options = LinkedDataProofOptions::default();
-        issue_options.verification_method = Some("did:web:localhost#key1".to_string());
+        issue_options.verification_method = Some(URI::String("did:web:localhost#key1".to_string()));
         let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         println!("{}", serde_json::to_string_pretty(&proof).unwrap());
         vc.add_proof(proof);

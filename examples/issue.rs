@@ -1,5 +1,6 @@
-// To generate text fixture:
-// cargo run --example issue > examples/vc.jsonld
+// To generate test vectors:
+// cargo run --example issue ldp > examples/vc.jsonld
+// cargo run --example issue jwt > examples/vc.jwt
 
 #[async_std::main]
 async fn main() {
@@ -17,13 +18,30 @@ async fn main() {
     let mut vc: ssi::vc::Credential = serde_json::from_value(vc).unwrap();
     let mut proof_options = ssi::vc::LinkedDataProofOptions::default();
     let verification_method = "did:example:foo#key1".to_string();
-    proof_options.verification_method = Some(verification_method);
-    let proof = vc.generate_proof(&key, &proof_options).await.unwrap();
-    vc.add_proof(proof);
-    let result = vc.verify(None, &ssi::did::example::DIDExample).await;
-    if result.errors.len() > 0 {
-        panic!("verify failed: {:#?}", result);
+    proof_options.verification_method = Some(ssi::vc::URI::String(verification_method));
+    let proof_format = std::env::args().skip(1).next();
+    match &proof_format.unwrap()[..] {
+        "ldp" => {
+            let proof = vc.generate_proof(&key, &proof_options).await.unwrap();
+            vc.add_proof(proof);
+            let result = vc.verify(None, &ssi::did::example::DIDExample).await;
+            if result.errors.len() > 0 {
+                panic!("verify failed: {:#?}", result);
+            }
+            let stdout_writer = std::io::BufWriter::new(std::io::stdout());
+            serde_json::to_writer_pretty(stdout_writer, &vc).unwrap();
+        }
+        "jwt" => {
+            proof_options.created = None;
+            proof_options.checks = None;
+            let jwt = vc.generate_jwt(Some(&key), &proof_options).await.unwrap();
+            let result =
+                ssi::vc::Credential::verify_jwt(&jwt, None, &ssi::did::example::DIDExample).await;
+            if result.errors.len() > 0 {
+                panic!("verify failed: {:#?}", result);
+            }
+            print!("{}", jwt);
+        }
+        format => panic!("unknown proof format: {}", format),
     }
-    let stdout_writer = std::io::BufWriter::new(std::io::stdout());
-    serde_json::to_writer_pretty(stdout_writer, &vc).unwrap();
 }

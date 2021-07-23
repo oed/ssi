@@ -3,6 +3,8 @@ use crate::caip10::BlockchainAccountIdVerifyError;
 #[cfg(feature = "keccak-hash")]
 use crate::eip712::TypedDataConstructionError;
 #[cfg(feature = "keccak-hash")]
+use crate::eip712::TypedDataConstructionJSONError;
+#[cfg(feature = "keccak-hash")]
 use crate::eip712::TypedDataHashError;
 use crate::json_ld;
 use crate::tzkey::{DecodeTezosSignatureError, EncodeTezosSignedMessageError};
@@ -47,6 +49,7 @@ pub enum Error {
     MissingAlgorithm,
     MissingCurve,
     MissingPoint,
+    MissingKeyValue,
     MissingIdentifier,
     MissingChosenIssuer,
     ExpectedTerm,
@@ -56,6 +59,7 @@ pub enum Error {
     ExpectedIRIRef,
     ExpectedLang,
     AlgorithmMismatch,
+    KeyIdVMMismatch(String, String),
     KeyMismatch,
     VerificationMethodMismatch,
     UnsupportedAlgorithm,
@@ -68,6 +72,7 @@ pub enum Error {
     MissingExponent,
     MissingPrime,
     MissingCredential,
+    MissingPresentation,
     MissingKeyParameters,
     MissingProof,
     MissingIssuanceDate,
@@ -78,6 +83,7 @@ pub enum Error {
     MissingVerificationMethod,
     Key,
     Secp256k1Parse(String),
+    Secp256r1Parse(String),
     MultipleKeyMaterial,
     TimeError,
     URI,
@@ -104,6 +110,7 @@ pub enum Error {
     UnsupportedBlankPredicate,
     TooManyBlankNodes,
     JWTCredentialInPresentation,
+    UnencodableOptionClaim(String),
     ExpectedUnencodedHeader,
     ResourceNotFound(String),
     InvalidProofTypeType,
@@ -171,6 +178,8 @@ pub enum Error {
     #[cfg(feature = "keccak-hash")]
     TypedDataConstruction(TypedDataConstructionError),
     #[cfg(feature = "keccak-hash")]
+    TypedDataConstructionJSON(TypedDataConstructionJSONError),
+    #[cfg(feature = "keccak-hash")]
     TypedDataHash(TypedDataHashError),
     FromHex(hex::FromHexError),
     Base58(bs58::decode::Error),
@@ -184,6 +193,7 @@ pub enum Error {
     K256EC(k256::elliptic_curve::Error),
     #[cfg(feature = "p256")]
     P256EC(p256::elliptic_curve::Error),
+    MissingFeatures(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -211,8 +221,10 @@ impl fmt::Display for Error {
             Error::MissingAccountId => write!(f, "Missing account id"),
             Error::MissingVerificationMethod => write!(f, "Missing verificationMethod"),
             Error::MissingCredential => write!(f, "Verifiable credential not found in JWT"),
+            Error::MissingPresentation => write!(f, "Verifiable presentation not found in JWT"),
             Error::Key => write!(f, "problem with JWT key"),
             Error::Secp256k1Parse(s) => write!(f, "problem parsing secp256k1 key: {}", s),
+            Error::Secp256r1Parse(s) => write!(f, "problem parsing secp256r1 key: {}", s),
             Error::MultipleKeyMaterial => write!(f, "A verification method MUST NOT contain multiple verification material properties for the same material."),
             Error::NotImplemented => write!(f, "Not implemented"),
             Error::AlgorithmNotImplemented => write!(f, "JWA algorithm not implemented"),
@@ -220,6 +232,7 @@ impl fmt::Display for Error {
             Error::MissingAlgorithm => write!(f, "Missing algorithm in JWT"),
             Error::MissingCurve => write!(f, "Missing curve in JWK"),
             Error::MissingPoint => write!(f, "Missing elliptic curve point in JWK"),
+            Error::MissingKeyValue => write!(f, "Missing key value for symmetric key"),
             Error::MissingIdentifier => write!(f, "Missing identifier"),
             Error::MissingChosenIssuer => write!(f, "Missing chosen issuer"),
             Error::ExpectedTerm => write!(f, "Expected RDF term"),
@@ -229,6 +242,7 @@ impl fmt::Display for Error {
             Error::ExpectedIRIRef => write!(f, "Expected RDF IRI reference"),
             Error::ExpectedLang => write!(f, "Expected RDF language tag"),
             Error::AlgorithmMismatch => write!(f, "Algorithm in JWS header does not match JWK"),
+            Error::KeyIdVMMismatch(vm, kid) => write!(f, "Verification method id does not match JWK id. VM id: {}, JWK key id: {}", vm, kid),
             Error::KeyMismatch => write!(f, "Key mismatch"),
             Error::VerificationMethodMismatch => write!(f, "Verification method mismatch"),
             Error::UnsupportedAlgorithm => write!(f, "Unsupported algorithm"),
@@ -250,13 +264,14 @@ impl fmt::Display for Error {
             Error::InvalidProofDomain => write!(f, "Invalid proof domain"),
             Error::MissingCredentialSchema => write!(f, "Missing credential schema for ZKP"),
             Error::UnsupportedProperty => write!(f, "Unsupported property for LDP"),
-            Error::UnsupportedKeyType => write!(f, "Unsupported key type for did:key"),
+            Error::UnsupportedKeyType => write!(f, "Unsupported key type"),
             Error::TooManyBlankNodes => write!(f, "Multiple blank nodes not supported. Either credential or credential subject must have id property. Presentation must have id property."),
             Error::UnsupportedType => write!(f, "Unsupported type for LDP"),
             Error::UnsupportedProofPurpose => write!(f, "Unsupported proof purpose"),
             Error::UnsupportedCheck => write!(f, "Unsupported check"),
             Error::UnsupportedBlankPredicate => write!(f, "Blank node identifier in predicate is unsupported"),
             Error::JWTCredentialInPresentation => write!(f, "Unsupported JWT VC in VP"),
+            Error::UnencodableOptionClaim(name) => write!(f, "Linked data proof option unencodable as JWT claim: {}", name),
             Error::ExpectedUnencodedHeader => write!(f, "Expected unencoded JWT header"),
             Error::ResourceNotFound(id) => write!(f, "Resource not found: {}", id),
             Error::InvalidProofTypeType => write!(f, "Invalid ProofType type"),
@@ -329,6 +344,8 @@ impl fmt::Display for Error {
             #[cfg(feature = "keccak-hash")]
             Error::TypedDataConstruction(e) => e.fmt(f),
             #[cfg(feature = "keccak-hash")]
+            Error::TypedDataConstructionJSON(e) => e.fmt(f),
+            #[cfg(feature = "keccak-hash")]
             Error::TypedDataHash(e) => e.fmt(f),
             Error::FromHex(e) => e.fmt(f),
             Error::Base58(e) => e.fmt(f),
@@ -339,6 +356,7 @@ impl fmt::Display for Error {
             Error::P256KeyLength(len) => write!(f, "Expected 64 byte uncompressed key or 33 bytes compressed key but found length: {}", len),
             Error::ECEncodingError => write!(f, "Unable to encode EC key"),
             Error::ECDecompress => write!(f, "Unable to decompress elliptic curve"),
+            Error::MissingFeatures(features) => write!(f, "Missing features: {}", features),
         }
     }
 }
@@ -458,6 +476,13 @@ impl From<BlockchainAccountIdVerifyError> for Error {
 impl From<TypedDataConstructionError> for Error {
     fn from(err: TypedDataConstructionError) -> Error {
         Error::TypedDataConstruction(err)
+    }
+}
+
+#[cfg(feature = "keccak-hash")]
+impl From<TypedDataConstructionJSONError> for Error {
+    fn from(err: TypedDataConstructionJSONError) -> Error {
+        Error::TypedDataConstructionJSON(err)
     }
 }
 

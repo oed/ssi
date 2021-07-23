@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use chrono::prelude::*;
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 use ssi::caip10::BlockchainAccountId;
 use ssi::did::{
@@ -8,7 +10,6 @@ use ssi::did::{
 };
 use ssi::did_resolve::{
     DIDResolver, DocumentMetadata, ResolutionInputMetadata, ResolutionMetadata, ERROR_INVALID_DID,
-    TYPE_DID_LD_JSON,
 };
 use ssi::jwk::{Base64urlUInt, OctetParams, Params, JWK};
 
@@ -27,11 +28,9 @@ type ResolutionResult = (
 
 fn resolution_result(doc: Document) -> ResolutionResult {
     let res_meta = ResolutionMetadata {
-        content_type: Some(TYPE_DID_LD_JSON.to_string()),
         ..Default::default()
     };
     let doc_meta = DocumentMetadata {
-        created: Some(Utc::now()),
         ..Default::default()
     };
     (res_meta, Some(doc), Some(doc_meta))
@@ -45,16 +44,26 @@ async fn resolve_tz(did: &str, account_address: String) -> ResolutionResult {
     if account_address.len() < 3 {
         return resolution_error(&ERROR_INVALID_DID);
     }
-    let vm_type = match &account_address[0..3] {
-        "tz1" => "Ed25519PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021",
-        "tz2" => "EcdsaSecp256k1RecoveryMethod2020",
-        "tz3" => "P256PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021",
+    let (vm_type, vm_type_iri) = match &account_address[0..3] {
+        "tz1" => ("Ed25519PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021", "https://w3id.org/security#Ed25519PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021"),
+        "tz2" => ("EcdsaSecp256k1RecoveryMethod2020", "https://identity.foundation/EcdsaSecp256k1RecoverySignature2020#EcdsaSecp256k1RecoveryMethod2020"),
+        "tz3" => ("P256PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021", "https://w3id.org/security#P256PublicKeyBLAKE2BDigestSize20Base58CheckEncoded2021"),
         _ => return resolution_error(&ERROR_INVALID_DID),
     };
     let blockchain_account_id = BlockchainAccountId {
         account_address,
         chain_id: "tezos:mainnet".to_string(),
     };
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(vm_type.to_string(), Value::String(vm_type_iri.to_string()));
+    context.insert(
+        "TezosMethod2021".to_string(),
+        Value::String("https://w3id.org/security#TezosMethod2021".to_string()),
+    );
 
     let vm_url = DIDURL {
         did: did.to_string(),
@@ -83,7 +92,10 @@ async fn resolve_tz(did: &str, account_address: String) -> ResolutionResult {
     });
 
     let doc = Document {
-        context: Contexts::One(Context::URI(DEFAULT_CONTEXT.to_string())),
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
         id: did.to_string(),
         verification_method: Some(vec![vm, vm2]),
         authentication: Some(vec![
@@ -103,9 +115,18 @@ async fn resolve_eth(did: &str, account_address: String) -> ResolutionResult {
     if !account_address.starts_with("0x") {
         return resolution_error(&ERROR_INVALID_DID);
     }
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(
+        "EcdsaSecp256k1RecoveryMethod2020".to_string(),
+        Value::String("https://identity.foundation/EcdsaSecp256k1RecoverySignature2020#EcdsaSecp256k1RecoveryMethod2020".to_string()),
+    );
     let blockchain_account_id = BlockchainAccountId {
         account_address,
-        chain_id: "eip155:mainnet".to_string(),
+        chain_id: "eip155:1".to_string(),
     };
     let vm_url = DIDURL {
         did: did.to_string(),
@@ -134,7 +155,10 @@ async fn resolve_eth(did: &str, account_address: String) -> ResolutionResult {
     });
     */
     let doc = Document {
-        context: Contexts::One(Context::URI(DEFAULT_CONTEXT.to_string())),
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
         id: did.to_string(),
         verification_method: Some(vec![vm /*, eip712vm*/]),
         authentication: Some(vec![
@@ -154,6 +178,53 @@ async fn resolve_eth(did: &str, account_address: String) -> ResolutionResult {
     resolution_result(doc)
 }
 
+async fn resolve_celo(did: &str, account_address: String) -> ResolutionResult {
+    if !account_address.starts_with("0x") {
+        return resolution_error(&ERROR_INVALID_DID);
+    }
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(
+        "EcdsaSecp256k1RecoveryMethod2020".to_string(),
+        Value::String("https://identity.foundation/EcdsaSecp256k1RecoverySignature2020#EcdsaSecp256k1RecoveryMethod2020".to_string()),
+    );
+    let blockchain_account_id = BlockchainAccountId {
+        account_address,
+        chain_id: "eip155:42220".to_string(),
+    };
+    let vm_url = DIDURL {
+        did: did.to_string(),
+        fragment: Some("Recovery2020".to_string()),
+        ..Default::default()
+    };
+    let vm = VerificationMethod::Map(VerificationMethodMap {
+        id: vm_url.to_string(),
+        type_: "EcdsaSecp256k1RecoveryMethod2020".to_string(),
+        controller: did.to_string(),
+        blockchain_account_id: Some(blockchain_account_id.to_string()),
+        ..Default::default()
+    });
+    let doc = Document {
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
+        id: did.to_string(),
+        verification_method: Some(vec![vm]),
+        authentication: Some(vec![
+            VerificationMethod::DIDURL(vm_url.clone()),
+        ]),
+        assertion_method: Some(vec![
+            VerificationMethod::DIDURL(vm_url),
+        ]),
+        ..Default::default()
+    };
+    resolution_result(doc)
+}
+
 async fn resolve_sol(did: &str, account_address: String) -> ResolutionResult {
     let public_key_bytes = match bs58::decode(&account_address).into_vec() {
         Ok(bytes) => bytes,
@@ -162,6 +233,26 @@ async fn resolve_sol(did: &str, account_address: String) -> ResolutionResult {
     if public_key_bytes.len() != 32 {
         return resolution_error(&ERROR_INVALID_DID);
     }
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(
+        "publicKeyJwk".to_string(),
+        serde_json::json!({
+            "@id": "https://w3id.org/security#publicKeyJwk",
+            "@type": "@json"
+        }),
+    );
+    context.insert(
+        "Ed25519VerificationKey2018".to_string(),
+        Value::String("https://w3id.org/security#Ed25519VerificationKey2018".to_string()),
+    );
+    context.insert(
+        "SolanaMethod2021".to_string(),
+        Value::String("https://w3id.org/security#SolanaMethod2021".to_string()),
+    );
     let pk_jwk = JWK {
         params: Params::OKP(OctetParams {
             curve: "Ed25519".to_string(),
@@ -208,7 +299,10 @@ async fn resolve_sol(did: &str, account_address: String) -> ResolutionResult {
         ..Default::default()
     });
     let doc = Document {
-        context: Contexts::One(Context::URI(DEFAULT_CONTEXT.to_string())),
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
         id: did.to_string(),
         verification_method: Some(vec![vm, solvm]),
         authentication: Some(vec![
@@ -244,8 +338,20 @@ async fn resolve_btc(did: &str, account_address: String) -> ResolutionResult {
         blockchain_account_id: Some(blockchain_account_id.to_string()),
         ..Default::default()
     });
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(
+        "EcdsaSecp256k1RecoveryMethod2020".to_string(),
+        Value::String("https://identity.foundation/EcdsaSecp256k1RecoverySignature2020#EcdsaSecp256k1RecoveryMethod2020".to_string()),
+    );
     let doc = Document {
-        context: Contexts::One(Context::URI(DEFAULT_CONTEXT.to_string())),
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
         id: did.to_string(),
         verification_method: Some(vec![vm]),
         authentication: Some(vec![VerificationMethod::DIDURL(vm_url.clone())]),
@@ -259,6 +365,15 @@ async fn resolve_doge(did: &str, account_address: String) -> ResolutionResult {
     if !account_address.starts_with("D") {
         return resolution_error(&ERROR_INVALID_DID);
     }
+    let mut context = BTreeMap::new();
+    context.insert(
+        "blockchainAccountId".to_string(),
+        Value::String("https://w3id.org/security#blockchainAccountId".to_string()),
+    );
+    context.insert(
+        "EcdsaSecp256k1RecoveryMethod2020".to_string(),
+        Value::String("https://identity.foundation/EcdsaSecp256k1RecoverySignature2020#EcdsaSecp256k1RecoveryMethod2020".to_string()),
+    );
     let blockchain_account_id = BlockchainAccountId {
         account_address,
         chain_id: CHAIN_ID_DOGECOIN_MAINNET.to_string(),
@@ -276,7 +391,10 @@ async fn resolve_doge(did: &str, account_address: String) -> ResolutionResult {
         ..Default::default()
     });
     let doc = Document {
-        context: Contexts::One(Context::URI(DEFAULT_CONTEXT.to_string())),
+        context: Contexts::Many(vec![
+            Context::URI(DEFAULT_CONTEXT.to_string()),
+            Context::Object(context),
+        ]),
         id: did.to_string(),
         verification_method: Some(vec![vm]),
         authentication: Some(vec![VerificationMethod::DIDURL(vm_url.clone())]),
@@ -302,6 +420,7 @@ impl DIDResolver for DIDPKH {
         match &type_[..] {
             "tz" => resolve_tz(did, data).await,
             "eth" => resolve_eth(did, data).await,
+            "celo" => resolve_celo(did, data).await,
             "sol" => resolve_sol(did, data).await,
             "btc" => resolve_btc(did, data).await,
             "doge" => resolve_doge(did, data).await,
@@ -354,6 +473,7 @@ impl DIDMethod for DIDPKH {
         let addr = match match &pkh_name[..] {
             "tz" => ssi::blakesig::hash_public_key(key).ok(),
             "eth" => ssi::keccak_hash::hash_public_key(key).ok(),
+            "celo" => ssi::keccak_hash::hash_public_key(key).ok(),
             "sol" => generate_sol(key),
             "btc" => generate_btc(key).ok(),
             "doge" => generate_doge(key).ok(),
@@ -374,7 +494,7 @@ impl DIDMethod for DIDPKH {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{from_str, from_value, json, Value};
+    use serde_json::{from_str, from_value, json};
     use ssi::jwk::Algorithm;
     use ssi::ldp::ProofSuite;
     use ssi::one_or_many::OneOrMany;
@@ -402,9 +522,14 @@ mod tests {
             "did:pkh:eth:0x2fbf1be19d90a29aea9363f4ef0b6bf1c4ff0758",
         );
         test_generate(
+            secp256k1_pk.clone(),
+            "celo",
+            "did:pkh:celo:0x2fbf1be19d90a29aea9363f4ef0b6bf1c4ff0758",
+        );
+        test_generate(
             json!({
                 "kty": "OKP",
-                "crv": "Ed25519",
+                "crv": "EdBlake2b",
                 "x": "GvidwVqGgicuL68BRM89OOtDzK1gjs8IqUXFkjKkm8Iwg18slw==",
                 "d": "K44dAtJ-MMl-JKuOupfcGRPI5n3ZVH_Gk65c6Rcgn_IV28987PMw_b6paCafNOBOi5u-FZMgGJd3mc5MkfxfwjCrXQM-"
             }),
@@ -474,6 +599,11 @@ mod tests {
         )
         .await;
         test_resolve(
+            "did:pkh:celo:0xa0ae58da58dfa46fa55c3b86545e7065f90ff011",
+            include_str!("../tests/did-celo.jsonld"),
+        )
+        .await;
+        test_resolve(
             "did:pkh:sol:CKg5d12Jhpej1JqtmxLJgaFqqeYjxgPqToJ4LBdvG9Ev",
             include_str!("../tests/did-sol.jsonld"),
         )
@@ -519,6 +649,8 @@ mod tests {
         type_: &str,
         vm_relative_url: &str,
         proof_suite: &dyn ProofSuite,
+        eip712_domain_opt: Option<ssi::eip712::ProofInfo>,
+        vp_eip712_domain_opt: Option<ssi::eip712::ProofInfo>,
     ) {
         use ssi::vc::{Credential, Issuer, LinkedDataProofOptions, URI};
         let did = DIDPKH
@@ -526,8 +658,8 @@ mod tests {
             .unwrap();
         eprintln!("did: {}", did);
         let mut vc: Credential = from_value(json!({
-            "@context": "https://www.w3.org/2018/credentials/v1",
-            "type": "VerifiableCredential",
+            "@context": ["https://www.w3.org/2018/credentials/v1"],
+            "type": ["VerifiableCredential"],
             "issuer": did.clone(),
             "issuanceDate": "2021-03-18T16:38:25Z",
             "credentialSubject": {
@@ -537,17 +669,24 @@ mod tests {
         .unwrap();
         vc.validate_unsigned().unwrap();
         let issue_options = LinkedDataProofOptions {
-            verification_method: Some(did.to_string() + vm_relative_url),
+            verification_method: Some(URI::String(did.to_string() + vm_relative_url)),
+            eip712_domain: eip712_domain_opt,
             ..Default::default()
         };
         eprintln!("vm {:?}", issue_options.verification_method);
         let vc_no_proof = vc.clone();
-        let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         /*
-        let proof = proof_suite.sign(&vc, &issue_options, &key).await.unwrap();
+        let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         */
+        // Sign with proof suite directly because there is not currently a way to do it
+        // for Eip712Signature2021 in did-pkh otherwise.
+        let proof = proof_suite
+            .sign(&vc, &issue_options, &key, None)
+            .await
+            .unwrap();
         println!("{}", serde_json::to_string_pretty(&proof).unwrap());
         vc.add_proof(proof);
+        println!("VC: {}", serde_json::to_string_pretty(&vc).unwrap());
         vc.validate().unwrap();
         let verification_result = vc.verify(None, &DIDPKH).await;
         println!("{:#?}", verification_result);
@@ -561,7 +700,7 @@ mod tests {
         // Check that proof JWK must match proof verificationMethod
         let mut vc_wrong_key = vc_no_proof.clone();
         let proof_bad = proof_suite
-            .sign(&vc_no_proof, &issue_options, &wrong_key)
+            .sign(&vc_no_proof, &issue_options, &wrong_key, None)
             .await
             .unwrap();
         vc_wrong_key.add_proof(proof_bad);
@@ -591,9 +730,14 @@ mod tests {
         };
         let mut vp_issue_options = LinkedDataProofOptions::default();
         vp.holder = Some(URI::String(did.to_string()));
-        vp_issue_options.verification_method = Some(did.to_string() + vm_relative_url);
+        vp_issue_options.verification_method = Some(URI::String(did.to_string() + vm_relative_url));
         vp_issue_options.proof_purpose = Some(ProofPurpose::Authentication);
-        let vp_proof = vp.generate_proof(&key, &vp_issue_options).await.unwrap();
+        vp_issue_options.eip712_domain = vp_eip712_domain_opt;
+        // let vp_proof = vp.generate_proof(&key, &vp_issue_options).await.unwrap();
+        let vp_proof = proof_suite
+            .sign(&vp, &vp_issue_options, &key, None)
+            .await
+            .unwrap();
         vp.add_proof(vp_proof);
         println!("VP: {}", serde_json::to_string_pretty(&vp).unwrap());
         vp.validate().unwrap();
@@ -639,13 +783,13 @@ mod tests {
         .unwrap();
         vc.validate_unsigned().unwrap();
         let issue_options = LinkedDataProofOptions {
-            verification_method: Some(did.to_string() + vm_relative_url),
+            verification_method: Some(URI::String(did.to_string() + vm_relative_url)),
             ..Default::default()
         };
         eprintln!("vm {:?}", issue_options.verification_method);
         let vc_no_proof = vc.clone();
         let prep = proof_suite
-            .prepare(&vc, &issue_options, &key)
+            .prepare(&vc, &issue_options, &key, None)
             .await
             .unwrap();
 
@@ -669,7 +813,7 @@ mod tests {
         // Check that proof JWK must match proof verificationMethod
         let mut vc_wrong_key = vc_no_proof.clone();
         let proof_bad = proof_suite
-            .sign(&vc_no_proof, &issue_options, &wrong_key)
+            .sign(&vc_no_proof, &issue_options, &wrong_key, None)
             .await
             .unwrap();
         vc_wrong_key.add_proof(proof_bad);
@@ -699,11 +843,11 @@ mod tests {
         };
         let mut vp_issue_options = LinkedDataProofOptions::default();
         vp.holder = Some(URI::String(did.to_string()));
-        vp_issue_options.verification_method = Some(did.to_string() + vm_relative_url);
+        vp_issue_options.verification_method = Some(URI::String(did.to_string() + vm_relative_url));
         vp_issue_options.proof_purpose = Some(ProofPurpose::Authentication);
 
         let prep = proof_suite
-            .prepare(&vp, &vp_issue_options, &key)
+            .prepare(&vp, &vp_issue_options, &key, None)
             .await
             .unwrap();
         let sig = sign_tezos(&prep, algorithm, &key);
@@ -743,15 +887,26 @@ mod tests {
             from_str(include_str!("../../tests/secp256k1-2021-02-17.json")).unwrap();
         let key_secp256k1_recovery = JWK {
             algorithm: Some(Algorithm::ES256KR),
-            ..key_secp256k1
+            ..key_secp256k1.clone()
         };
-        let key_ed25519: JWK =
+        let key_secp256k1_eip712sig = JWK {
+            algorithm: Some(Algorithm::ES256KR),
+            key_operations: Some(vec!["signTypedData".to_string()]),
+            ..key_secp256k1.clone()
+        };
+        let key_secp256k1_epsig = JWK {
+            algorithm: Some(Algorithm::ES256KR),
+            key_operations: Some(vec!["signPersonalMessage".to_string()]),
+            ..key_secp256k1.clone()
+        };
+
+        let mut key_ed25519: JWK =
             from_str(include_str!("../../tests/ed25519-2020-10-18.json")).unwrap();
-        let key_p256: JWK =
+        let mut key_p256: JWK =
             from_str(include_str!("../../tests/secp256r1-2021-03-18.json")).unwrap();
         let other_key_secp256k1 = JWK::generate_secp256k1().unwrap();
-        let other_key_ed25519 = JWK::generate_ed25519().unwrap();
-        let other_key_p256 = JWK::generate_p256().unwrap();
+        let mut other_key_ed25519 = JWK::generate_ed25519().unwrap();
+        let mut other_key_p256 = JWK::generate_p256().unwrap();
 
         // eth/Recovery2020
         credential_prove_verify_did_pkh(
@@ -760,50 +915,173 @@ mod tests {
             "eth",
             "#Recovery2020",
             &ssi::ldp::EcdsaSecp256k1RecoverySignature2020,
+            None,
+            None,
         )
         .await;
 
-        /*
         // eth/Eip712
         credential_prove_verify_did_pkh(
-            key_secp256k1_recovery.clone(),
+            key_secp256k1_eip712sig.clone(),
             other_key_secp256k1.clone(),
             "eth",
-            "#Eip712Method2021",
+            "#Recovery2020",
             &ssi::ldp::Eip712Signature2021,
+            None,
+            None,
         )
         .await;
-        */
+
+        // eth/Eip712
+        let eip712_domain: ssi::eip712::ProofInfo = serde_json::from_value(json!({
+          "messageSchema": {
+            "EIP712Domain": [
+              { "name": "name", "type": "string" }
+            ],
+            "VerifiableCredential": [
+              { "name": "@context", "type": "string[]" },
+              { "name": "type", "type": "string[]" },
+              { "name": "issuer", "type": "string" },
+              { "name": "issuanceDate", "type": "string" },
+              { "name": "credentialSubject", "type": "CredentialSubject" },
+              { "name": "proof", "type": "Proof" }
+            ],
+            "CredentialSubject": [
+              { "name": "id", "type": "string" },
+            ],
+            "Proof": [
+              { "name": "@context", "type": "string" },
+              { "name": "verificationMethod", "type": "string" },
+              { "name": "created", "type": "string" },
+              { "name": "proofPurpose", "type": "string" },
+              { "name": "type", "type": "string" }
+            ]
+          },
+          "domain": {
+            "name": "EthereumEip712Signature2021",
+          },
+          "primaryType": "VerifiableCredential"
+        }))
+        .unwrap();
+        let vp_eip712_domain: ssi::eip712::ProofInfo = serde_json::from_value(json!({
+          "messageSchema": {
+            "EIP712Domain": [
+              { "name": "name", "type": "string" }
+            ],
+            "VerifiablePresentation": [
+              { "name": "@context", "type": "string[]" },
+              { "name": "type", "type": "string" },
+              { "name": "holder", "type": "string" },
+              { "name": "verifiableCredential", "type": "VerifiableCredential" },
+              { "name": "proof", "type": "Proof" }
+            ],
+            "VerifiableCredential": [
+              { "name": "@context", "type": "string[]" },
+              { "name": "type", "type": "string[]" },
+              { "name": "issuer", "type": "string" },
+              { "name": "issuanceDate", "type": "string" },
+              { "name": "credentialSubject", "type": "CredentialSubject" },
+              { "name": "proof", "type": "Proof" }
+            ],
+            "CredentialSubject": [
+              { "name": "id", "type": "string" },
+            ],
+            "Proof": [
+              { "name": "@context", "type": "string" },
+              { "name": "verificationMethod", "type": "string" },
+              { "name": "created", "type": "string" },
+              { "name": "proofPurpose", "type": "string" },
+              { "name": "proofValue", "type": "string" },
+              { "name": "eip712Domain", "type": "EIP712Info" },
+              { "name": "type", "type": "string" }
+            ],
+            "EIP712Info": [
+              { "name": "domain", "type": "EIP712Domain" },
+              { "name": "primaryType", "type": "string" },
+              { "name": "messageSchema", "type": "Types" },
+            ],
+            "Types": [
+              { "name": "EIP712Domain", "type": "Type[]" },
+              { "name": "VerifiableCredential", "type": "Type[]" },
+              { "name": "CredentialSubject", "type": "Type[]" },
+              { "name": "Proof", "type": "Type[]" },
+            ],
+            "Type": [
+              { "name": "name", "type": "string" },
+              { "name": "type", "type": "string" }
+            ]
+          },
+          "domain": {
+            "name": "EthereumEip712Signature2021",
+          },
+          "primaryType": "VerifiablePresentation"
+        }))
+        .unwrap();
+        credential_prove_verify_did_pkh(
+            key_secp256k1_eip712sig.clone(),
+            other_key_secp256k1.clone(),
+            "eth",
+            "#Recovery2020",
+            &ssi::ldp::EthereumEip712Signature2021,
+            Some(eip712_domain),
+            Some(vp_eip712_domain),
+        )
+        .await;
+
+        // eth/Eip712
+        credential_prove_verify_did_pkh(
+            key_secp256k1_epsig.clone(),
+            other_key_secp256k1.clone(),
+            "eth",
+            "#Recovery2020",
+            &ssi::ldp::Eip712Signature2021,
+            None,
+            None,
+        )
+        .await;
 
         println!("did:pkh:tz:tz1");
+        key_ed25519.algorithm = Some(Algorithm::EdBlake2b);
+        other_key_ed25519.algorithm = Some(Algorithm::EdBlake2b);
         credential_prove_verify_did_pkh(
             key_ed25519.clone(),
             other_key_ed25519.clone(),
             "tz",
             "#blockchainAccountId",
             &ssi::ldp::Ed25519BLAKE2BDigestSize20Base58CheckEncodedSignature2021,
+            None,
+            None,
         )
         .await;
+        key_ed25519.algorithm = Some(Algorithm::EdDSA);
+        other_key_ed25519.algorithm = Some(Algorithm::EdDSA);
 
-        println!("did:pkh:tz:tz2");
-        credential_prove_verify_did_pkh(
-            key_secp256k1_recovery.clone(),
-            other_key_secp256k1.clone(),
-            "tz",
-            "#blockchainAccountId",
-            &ssi::ldp::EcdsaSecp256k1RecoverySignature2020,
-        )
-        .await;
+        // TODO
+        // println!("did:pkh:tz:tz2");
+        // credential_prove_verify_did_pkh(
+        //     key_secp256k1_recovery.clone(),
+        //     other_key_secp256k1.clone(),
+        //     "tz",
+        //     "#blockchainAccountId",
+        //     &ssi::ldp::EcdsaSecp256k1RecoverySignature2020,
+        // )
+        // .await;
 
         println!("did:pkh:tz:tz3");
+        key_p256.algorithm = Some(Algorithm::ESBlake2b);
+        other_key_p256.algorithm = Some(Algorithm::ESBlake2b);
         credential_prove_verify_did_pkh(
             key_p256.clone(),
             other_key_p256.clone(),
             "tz",
             "#blockchainAccountId",
             &ssi::ldp::P256BLAKE2BDigestSize20Base58CheckEncodedSignature2021,
+            None,
+            None,
         )
         .await;
+        key_p256.algorithm = Some(Algorithm::ES256);
+        other_key_p256.algorithm = Some(Algorithm::ES256);
 
         println!("did:pkh:sol");
         credential_prove_verify_did_pkh(
@@ -812,6 +1090,8 @@ mod tests {
             "sol",
             "#controller",
             &ssi::ldp::Ed25519Signature2018,
+            None,
+            None,
         )
         .await;
 
@@ -834,6 +1114,8 @@ mod tests {
             "btc",
             "#blockchainAccountId",
             &ssi::ldp::EcdsaSecp256k1RecoverySignature2020,
+            None,
+            None,
         )
         .await;
 
@@ -844,12 +1126,16 @@ mod tests {
             "doge",
             "#blockchainAccountId",
             &ssi::ldp::EcdsaSecp256k1RecoverySignature2020,
+            None,
+            None,
         )
         .await;
 
         println!("did:pkh:tz:tz1 - TezosMethod2021");
+        key_ed25519.algorithm = Some(Algorithm::EdBlake2b);
+        other_key_ed25519.algorithm = Some(Algorithm::EdBlake2b);
         credential_prepare_complete_verify_did_pkh_tz(
-            Algorithm::EdDSA,
+            Algorithm::EdBlake2b,
             key_ed25519.clone(),
             other_key_ed25519.clone(),
             "tz",
@@ -857,11 +1143,13 @@ mod tests {
             &ssi::ldp::TezosSignature2021,
         )
         .await;
+        key_ed25519.algorithm = Some(Algorithm::EdDSA);
+        other_key_ed25519.algorithm = Some(Algorithm::EdDSA);
 
         /* https://github.com/spruceid/ssi/issues/194
         println!("did:pkh:tz:tz2 - TezosMethod2021");
         credential_prepare_complete_verify_did_pkh_tz(
-            Algorithm::ES256KR,
+            Algorithm::ESBlake2bK,
             key_secp256k1_recovery.clone(),
             other_key_secp256k1.clone(),
             "tz",
@@ -872,8 +1160,10 @@ mod tests {
         */
 
         println!("did:pkh:tz:tz3 - TezosMethod2021");
+        key_p256.algorithm = Some(Algorithm::ESBlake2b);
+        other_key_p256.algorithm = Some(Algorithm::ESBlake2b);
         credential_prepare_complete_verify_did_pkh_tz(
-            Algorithm::ES256,
+            Algorithm::ESBlake2b,
             key_p256.clone(),
             other_key_p256.clone(),
             "tz",
@@ -881,11 +1171,11 @@ mod tests {
             &ssi::ldp::TezosSignature2021,
         )
         .await;
+        key_p256.algorithm = Some(Algorithm::ES256);
+        other_key_p256.algorithm = Some(Algorithm::ES256);
     }
 
-    #[tokio::test]
-    async fn verify_vc() {
-        let vc_str = include_str!("../tests/vc-tz1.jsonld");
+    async fn test_verify_vc(vc_str: &str) {
         let mut vc = ssi::vc::Credential::from_json_unsigned(vc_str).unwrap();
         vc.validate().unwrap();
         let verification_result = vc.verify(None, &DIDPKH).await;
@@ -898,5 +1188,14 @@ mod tests {
         let verification_result = vc.verify(None, &DIDPKH).await;
         println!("{:#?}", verification_result);
         assert!(verification_result.errors.len() > 0);
+    }
+
+    #[tokio::test]
+    async fn verify_vc() {
+        test_verify_vc(include_str!("../tests/vc-tz1.jsonld")).await;
+        test_verify_vc(include_str!("../tests/vc-eth-eip712sig.jsonld")).await;
+        test_verify_vc(include_str!("../tests/vc-eth-eip712vm.jsonld")).await;
+        test_verify_vc(include_str!("../tests/vc-eth-epsig.jsonld")).await;
+        test_verify_vc(include_str!("../tests/vc-celo-epsig.jsonld")).await;
     }
 }

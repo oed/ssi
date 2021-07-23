@@ -35,7 +35,8 @@ base64 = "0.12"
 ring = { version = "0.16", optional = true }
 rsa = { version = "0.3", optional = true }
 ed25519-dalek = { version = "1", optional = true }
-rand = { version = "0.7", optional = true }
+rand = { version = "0.8", optional = true }
+rand_old = { package = "rand", version = "0.7" }
 multibase = "0.8"
 simple_asn1 = "^0.5.2"
 num-bigint = "0.4"
@@ -58,10 +59,14 @@ blake2b_simd = "0.5"
 bs58 = { version = "0.4", features = ["check"] }
 thiserror = "1.0"
 keccak-hash = { version = "0.7", optional = true }
-k256 = { version = "0.7", optional = true, features = ["zeroize", "ecdsa"] }
-p256 = { version = "0.7", optional = true, features = ["zeroize", "ecdsa"] }
+# TODO make this optional, or remove it
+ecdsa = "0.11.1"
+digest = "0.9"
+k256 = { version = "0.8", optional = true, features = ["zeroize", "ecdsa"] }
+p256 = { version = "0.8", optional = true, features = ["zeroize", "ecdsa"] }
 ssi-contexts = { version = "0.1.0", path = "contexts/" }
 ripemd160 = { version = "0.9", optional = true }
+sshkeys = "0.3"
 
 # dependencies for json-ld
 log = "^0.4"
@@ -90,12 +95,15 @@ members = [
   "did-sol",
   "did-pkh",
   "did-onion",
+  "did-webkey",
   "vc-test",
+  "did-test",
 ]
 
 [dev-dependencies]
 uuid = { version = "0.8", features = ["v4", "serde"] }
 difference = "2.0"
+did-method-key = { path = "./did-key" }
 
 # dev-dependencies for json-ld
 static-iref = "^1.0"

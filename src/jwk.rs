@@ -2,7 +2,6 @@ use num_bigint::{BigInt, Sign};
 use simple_asn1::{ASN1Block, ASN1Class, ToASN1};
 use std::convert::TryFrom;
 use std::result::Result;
-use std::str::FromStr;
 
 use crate::der::{
     BitString, Ed25519PrivateKey, Ed25519PublicKey, Integer, OctetString, RSAPrivateKey,
@@ -15,10 +14,12 @@ use serde::{Deserialize, Serialize};
 // RFC 7516 - JSON Web Encryption (JWE)
 // RFC 7517 - JSON Web Key (JWK)
 // RFC 7518 - JSON Web Algorithms (JWA)
+// RFC 7638 - JSON Web Key (JWK) Thumbprint
 // RFC 8037 - CFRG ECDH and Signatures in JOSE
 // RFC 8812 - CBOR Object Signing and Encryption (COSE) and JSON Object Signing and Encryption
 //  (JOSE) Registrations for Web Authentication (WebAuthn) Algorithms
 
+/// Deprecated
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JWTKeys {
     #[serde(rename = "es256kPrivateKeyJwk")]
@@ -64,6 +65,7 @@ pub struct JWK {
 pub enum Params {
     EC(ECParams),
     RSA(RSAParams),
+    #[serde(rename = "oct")]
     Symmetric(SymmetricParams),
     OKP(OctetParams),
 }
@@ -117,7 +119,6 @@ pub struct RSAParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq)]
-#[serde(rename = "oct")]
 pub struct SymmetricParams {
     // Parameters for Symmetric Keys
     #[serde(rename = "k")]
@@ -125,7 +126,6 @@ pub struct SymmetricParams {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Hash, Eq)]
-#[serde(rename = "OKP")]
 pub struct OctetParams {
     // Parameters for Octet Key Pair Public Keys
     #[serde(rename = "crv")]
@@ -167,11 +167,14 @@ pub enum Algorithm {
     PS384,
     PS512,
     EdDSA,
+    EdBlake2b,
     ES256,
     ES256K,
     /// https://github.com/decentralized-identity/EcdsaSecp256k1RecoverySignature2020#es256k-r
     #[serde(rename = "ES256K-R")]
     ES256KR,
+    ESBlake2b,
+    ESBlake2bK,
     None,
 }
 
@@ -211,7 +214,7 @@ impl JWK {
 
     #[cfg(feature = "ed25519-dalek")]
     pub fn generate_ed25519() -> Result<JWK, Error> {
-        let mut csprng = rand::rngs::OsRng {};
+        let mut csprng = rand_old::rngs::OsRng {};
         let keypair = ed25519_dalek::Keypair::generate(&mut csprng);
         let sk_bytes = keypair.secret.to_bytes();
         let pk_bytes = keypair.public.to_bytes();
@@ -314,6 +317,67 @@ impl JWK {
         let mut key = self.clone();
         key.params = key.params.to_public();
         key
+    }
+
+    pub fn thumbprint(&self) -> Result<String, Error> {
+        // JWK parameters for thumbprint hashing must be in lexicographical order, and without
+        // string escaping.
+        // https://datatracker.ietf.org/doc/html/rfc7638#section-3.1
+        let json_string = match &self.params {
+            Params::RSA(rsa_params) => {
+                let n = rsa_params.modulus.as_ref().ok_or(Error::MissingModulus)?;
+                let e = rsa_params.exponent.as_ref().ok_or(Error::MissingExponent)?;
+                format!(
+                    r#"{{"e":"{}","kty":"RSA","n":"{}"}}"#,
+                    String::from(e),
+                    String::from(n)
+                )
+            }
+            Params::OKP(okp_params) => {
+                format!(
+                    r#"{{"crv":"{}","kty":"OKP","x":"{}"}}"#,
+                    okp_params.curve.clone(),
+                    String::from(okp_params.public_key.clone())
+                )
+            }
+            Params::EC(ec_params) => {
+                let curve = ec_params.curve.as_ref().ok_or(Error::MissingCurve)?;
+                let x = ec_params.x_coordinate.as_ref().ok_or(Error::MissingPoint)?;
+                let y = ec_params.y_coordinate.as_ref().ok_or(Error::MissingPoint)?;
+                format!(
+                    r#"{{"crv":"{}","kty":"EC","x":"{}","y":"{}"}}"#,
+                    curve.clone(),
+                    String::from(x),
+                    String::from(y)
+                )
+            }
+            Params::Symmetric(sym_params) => {
+                let k = sym_params
+                    .key_value
+                    .as_ref()
+                    .ok_or(Error::MissingKeyValue)?;
+                format!(r#"{{"k":"{}","kty":"oct"}}"#, String::from(k))
+            }
+        };
+        let hash = crate::hash::sha256(json_string.as_bytes())?;
+        let thumbprint = String::from(Base64urlUInt(hash.to_vec()));
+        Ok(thumbprint)
+    }
+}
+
+impl From<Params> for JWK {
+    fn from(params: Params) -> Self {
+        Self {
+            params,
+            public_key_use: None,
+            key_operations: None,
+            algorithm: None,
+            key_id: None,
+            x509_url: None,
+            x509_certificate_chain: None,
+            x509_thumbprint_sha1: None,
+            x509_thumbprint_sha256: None,
+        }
     }
 }
 
@@ -451,27 +515,6 @@ impl ToASN1 for OctetParams {
         } else {
             let key = Ed25519PublicKey { public_key };
             key.to_asn1_class(class)
-        }
-    }
-}
-
-impl FromStr for Algorithm {
-    type Err = Error;
-    fn from_str(algorithm: &str) -> Result<Self, Self::Err> {
-        match algorithm {
-            "HS256" => Ok(Self::HS256),
-            "HS384" => Ok(Self::HS384),
-            "HS512" => Ok(Self::HS512),
-            "RS256" => Ok(Self::RS256),
-            "RS384" => Ok(Self::RS384),
-            "RS512" => Ok(Self::RS512),
-            "PS256" => Ok(Self::PS256),
-            "PS384" => Ok(Self::PS384),
-            "PS512" => Ok(Self::PS512),
-            "EdDSA" => Ok(Self::EdDSA),
-            "ES256K" => Ok(Self::ES256K),
-            "ES256K-R" => Ok(Self::ES256KR),
-            _ => Err(Error::UnsupportedAlgorithm),
         }
     }
 }
@@ -641,7 +684,7 @@ pub fn secp256k1_parse(data: &[u8]) -> Result<JWK, String> {
 pub fn p256_parse(pk_bytes: &[u8]) -> Result<JWK, Error> {
     let (x, y) = match pk_bytes.len() {
         64 => (pk_bytes[0..32].to_vec(), pk_bytes[32..64].to_vec()),
-        33 => {
+        33 | 65 => {
             use p256::elliptic_curve::sec1::EncodedPoint;
             let encoded_point: EncodedPoint<p256::NistP256> = EncodedPoint::from_bytes(&pk_bytes)?
                 .decompress()
@@ -748,11 +791,13 @@ impl TryFrom<&k256::PublicKey> for ECParams {
     fn try_from(pk: &k256::PublicKey) -> Result<Self, Self::Error> {
         use k256::elliptic_curve::sec1::ToEncodedPoint;
         let ec_points = pk.to_encoded_point(false);
-        let pk_bytes = ec_points.as_bytes();
+        let x = ec_points.x().ok_or(Error::MissingPoint)?;
+        let y = ec_points.y().ok_or(Error::MissingPoint)?;
         Ok(ECParams {
+            // TODO according to https://tools.ietf.org/id/draft-jones-webauthn-secp256k1-00.html#rfc.section.2 it should be P-256K?
             curve: Some("secp256k1".to_string()),
-            x_coordinate: Some(Base64urlUInt(pk_bytes[1..33].to_vec())),
-            y_coordinate: Some(Base64urlUInt(pk_bytes[33..65].to_vec())),
+            x_coordinate: Some(Base64urlUInt(x.to_vec())),
+            y_coordinate: Some(Base64urlUInt(y.to_vec())),
             ecc_private_key: None,
         })
     }
@@ -837,5 +882,51 @@ mod tests {
     #[cfg(feature = "p256")]
     fn p256_generate() {
         let _jwk = JWK::generate_p256().unwrap();
+    }
+
+    #[test]
+    fn jwk_thumbprint() {
+        // https://tools.ietf.org/html/rfc7638#section-3.1
+        let key: JWK = serde_json::from_value(serde_json::json!({
+            "kty": "RSA",
+            "n": "0vx7agoebGcQSuuPiLJXZptN9nndrQmbXEps2aiAFbWhM78LhWx4cbbfAAtVT86zwu1RK7aPFFxuhDR1L6tSoc_BJECPebWKRXjBZCiFV4n3oknjhMstn64tZ_2W-5JsGY4Hc5n9yBXArwl93lqt7_RN5w6Cf0h4QyQ5v-65YGjQR0_FDW2QvzqY368QQMicAtaSqzs8KJZgnYb9c7d0zgdAZHzu6qMQvRL5hajrn1n91CbOpbISD08qNLyrdkt-bFTWhAI4vMQFh6WeZu0fM4lFd2NcRwr3XPksINHaQ-G_xBniIqbw0Ls1jF44-csFCur-kEgU8awapJzKnqDKgw",
+            "e": "AQAB",
+            "alg": "RS256",
+            "kid": "2011-04-29"
+        }))
+        .unwrap();
+        let thumbprint = key.thumbprint().unwrap();
+        assert_eq!(thumbprint, "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs");
+
+        // https://tools.ietf.org/html/rfc8037#appendix-A.3
+        let key: JWK = serde_json::from_value(serde_json::json!({
+            "crv": "Ed25519",
+            "kty": "OKP",
+            "x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        }))
+        .unwrap();
+        let thumbprint = key.thumbprint().unwrap();
+        assert_eq!(thumbprint, "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k");
+
+        // This EC JWK is from RFC 7518, its thumbprint is not.
+        // https://datatracker.ietf.org/doc/html/rfc7518#appendix-C
+        let key: JWK = serde_json::from_value(serde_json::json!({
+            "kty": "EC",
+            "crv": "P-256",
+            "x": "weNJy2HscCSM6AEDTDg04biOvhFhyyWvOHQfeF_PxMQ",
+            "y": "e8lnCO-AlStT-NJVX-crhB7QRYhiix03illJOVAOyck",
+        }))
+        .unwrap();
+        let thumbprint = key.thumbprint().unwrap();
+        assert_eq!(thumbprint, "Vy57XrArUrW0NbpI12tEzDHABxMwrTh6HHXRenSpnCo");
+
+        // Reuse the octet sequence from the Ed25519 example
+        let key: JWK = serde_json::from_value(serde_json::json!({
+            "kty": "oct",
+            "k": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"
+        }))
+        .unwrap();
+        let thumbprint = key.thumbprint().unwrap();
+        assert_eq!(thumbprint, "kcfv_I8tB4KY_ljAlRa1ip-y7jzbPdH0sUlCGb-1Jx8");
     }
 }

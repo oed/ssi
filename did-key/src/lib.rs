@@ -1,10 +1,15 @@
 use async_trait::async_trait;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
-use ssi::did::{DIDMethod, Document, Source, VerificationMethod, VerificationMethodMap, DIDURL};
+use ssi::did::{
+    Context, Contexts, DIDMethod, Document, Source, VerificationMethod, VerificationMethodMap,
+    DEFAULT_CONTEXT, DIDURL,
+};
 use ssi::did_resolve::{
     DIDResolver, DocumentMetadata, ResolutionInputMetadata, ResolutionMetadata, ERROR_INVALID_DID,
-    ERROR_NOT_FOUND, TYPE_DID_LD_JSON,
+    ERROR_NOT_FOUND,
 };
 #[cfg(feature = "secp256r1")]
 use ssi::jwk::p256_parse;
@@ -41,6 +46,7 @@ impl DIDResolver for DIDKey {
         Option<DocumentMetadata>,
     ) {
         let vm_type;
+        let vm_type_iri;
         if !did.starts_with("did:key:") {
             return (
                 ResolutionMetadata {
@@ -79,6 +85,15 @@ impl DIDResolver for DIDKey {
                 None,
             );
         }
+        let mut context = BTreeMap::new();
+        context.insert(
+            "publicKeyJwk".to_string(),
+            serde_json::json!({
+                "@id": "https://w3id.org/security#publicKeyJwk",
+                "@type": "@json"
+            }),
+        );
+
         let jwk = if data[0] == DID_KEY_ED25519_PREFIX[0] && data[1] == DID_KEY_ED25519_PREFIX[1] {
             if data.len() - 2 != 32 {
                 return (
@@ -92,6 +107,7 @@ impl DIDResolver for DIDKey {
                 );
             }
             vm_type = "Ed25519VerificationKey2018".to_string();
+            vm_type_iri = "https://w3id.org/security#Ed25519VerificationKey2018".to_string();
             JWK {
                 params: Params::OKP(OctetParams {
                     curve: "Ed25519".to_string(),
@@ -119,6 +135,8 @@ impl DIDResolver for DIDKey {
             match secp256k1_parse(&data[2..]) {
                 Ok(jwk) => {
                     vm_type = "EcdsaSecp256k1VerificationKey2019".to_string();
+                    vm_type_iri =
+                        "https://w3id.org/security#EcdsaSecp256k1VerificationKey2019".to_string();
                     jwk
                 }
                 Err(err) => return (ResolutionMetadata::from_error(&err), None, None),
@@ -134,6 +152,8 @@ impl DIDResolver for DIDKey {
             match p256_parse(&data[2..]) {
                 Ok(jwk) => {
                     vm_type = "EcdsaSecp256r1VerificationKey2019".to_string();
+                    vm_type_iri =
+                        "https://w3id.org/security#EcdsaSecp256r1VerificationKey2019".to_string();
                     jwk
                 }
                 Err(err) => return (ResolutionMetadata::from_error(&err.to_string()), None, None),
@@ -155,12 +175,17 @@ impl DIDResolver for DIDKey {
                 None,
             );
         };
+        context.insert(vm_type.to_string(), Value::String(vm_type_iri));
         let vm_didurl = DIDURL {
             did: did.to_string(),
             fragment: Some(method_specific_id.to_string()),
             ..Default::default()
         };
         let doc = Document {
+            context: Contexts::Many(vec![
+                Context::URI(DEFAULT_CONTEXT.to_string()),
+                Context::Object(context),
+            ]),
             id: did.to_string(),
             verification_method: Some(vec![VerificationMethod::Map(VerificationMethodMap {
                 id: did.to_string() + &"#" + method_specific_id,
@@ -174,11 +199,7 @@ impl DIDResolver for DIDKey {
             ..Default::default()
         };
         (
-            ResolutionMetadata {
-                error: None,
-                content_type: Some(TYPE_DID_LD_JSON.to_string()),
-                property_set: None,
-            },
+            ResolutionMetadata::default(),
             Some(doc),
             Some(DocumentMetadata::default()),
         )
@@ -243,16 +264,20 @@ impl DIDMethod for DIDKey {
                     }
                     #[cfg(feature = "secp256r1")]
                     "P-256" => {
-                        // P-256 did:key is uncompressed
-                        let (x, y) =
-                            match (params.x_coordinate.as_ref(), params.y_coordinate.as_ref()) {
-                                (Some(x), Some(y)) => (x.0.to_vec(), y.0.to_vec()),
-                                _ => return None,
-                            };
+                        use p256::elliptic_curve::sec1::ToEncodedPoint;
+                        use std::convert::TryFrom;
+                        let pk = match p256::PublicKey::try_from(params) {
+                            Ok(pk) => pk,
+                            Err(_err) => return None,
+                        };
                         "did:key:".to_string()
                             + &multibase::encode(
                                 multibase::Base::Base58Btc,
-                                [DID_KEY_P256_PREFIX.to_vec(), x, y].concat(),
+                                [
+                                    DID_KEY_P256_PREFIX.to_vec(),
+                                    pk.to_encoded_point(true).as_bytes().to_vec(),
+                                ]
+                                .concat(),
                             )
                     }
                     //_ => return Some(Err(DIDKeyError::UnsupportedCurve(params.curve.clone()))),
@@ -316,13 +341,13 @@ mod tests {
     #[async_std::test]
     async fn from_did_key_p256() {
         // https://w3c-ccg.github.io/did-method-key/#p-256
-        let did = "did:key:zrurwcJZss4ruepVNu1H3xmSirvNbzgBk9qrCktB6kaewXnJAhYWwtP3bxACqBpzjZdN7TyHNzzGGSSH5qvZsSDir9z";
+        let did = "did:key:zDnaerDaTF5BXEavCrfRZEk316dpbLsfPDZ3WJ5hRTPFU2169";
         let (res_meta, _doc, _doc_meta) = DIDKey
             .resolve(did, &ResolutionInputMetadata::default())
             .await;
         assert_eq!(res_meta.error, None);
 
-        let vm = "did:key:zrurwcJZss4ruepVNu1H3xmSirvNbzgBk9qrCktB6kaewXnJAhYWwtP3bxACqBpzjZdN7TyHNzzGGSSH5qvZsSDir9z#zrurwcJZss4ruepVNu1H3xmSirvNbzgBk9qrCktB6kaewXnJAhYWwtP3bxACqBpzjZdN7TyHNzzGGSSH5qvZsSDir9z";
+        let vm = "did:key:zDnaerDaTF5BXEavCrfRZEk316dpbLsfPDZ3WJ5hRTPFU2169#zDnaerDaTF5BXEavCrfRZEk316dpbLsfPDZ3WJ5hRTPFU2169";
         let (res_meta, object, _meta) =
             dereference(&DIDKey, &vm, &DereferencingInputMetadata::default()).await;
         assert_eq!(res_meta.error, None);
@@ -367,7 +392,7 @@ mod tests {
         let verification_method = get_verification_method(&did, &DIDKey).await.unwrap();
         let mut issue_options = LinkedDataProofOptions::default();
         vc.issuer = Some(Issuer::URI(URI::String(did.clone())));
-        issue_options.verification_method = Some(verification_method);
+        issue_options.verification_method = Some(URI::String(verification_method));
         let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         println!("{}", serde_json::to_string_pretty(&proof).unwrap());
         vc.add_proof(proof);
@@ -402,7 +427,7 @@ mod tests {
 
         let verification_method = get_verification_method(&did, &DIDKey).await.unwrap();
         let mut issue_options = LinkedDataProofOptions::default();
-        issue_options.verification_method = Some(verification_method);
+        issue_options.verification_method = Some(URI::String(verification_method));
         let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         println!("{}", serde_json::to_string_pretty(&proof).unwrap());
         vc.add_proof(proof);
@@ -437,7 +462,7 @@ mod tests {
 
         let verification_method = get_verification_method(&did, &DIDKey).await.unwrap();
         let mut issue_options = LinkedDataProofOptions::default();
-        issue_options.verification_method = Some(verification_method);
+        issue_options.verification_method = Some(URI::String(verification_method));
         let proof = vc.generate_proof(&key, &issue_options).await.unwrap();
         println!("{}", serde_json::to_string_pretty(&proof).unwrap());
         vc.add_proof(proof);

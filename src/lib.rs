@@ -19,9 +19,16 @@ pub mod rdf;
 #[cfg(feature = "ripemd160")]
 pub mod ripemd;
 pub mod soltx;
+pub mod ssh;
 pub mod tzkey;
 pub mod urdna2015;
 pub mod vc;
+pub mod zcap;
+
+pub static USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
+#[cfg(any(feature = "k256", feature = "p256"))]
+pub mod passthrough_digest;
 
 #[path = "../json-ld/src/lib.rs"]
 mod json_ld;

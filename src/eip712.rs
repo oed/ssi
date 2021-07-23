@@ -85,6 +85,25 @@ pub struct TypedData {
     pub message: EIP712Value,
 }
 
+/// Object containing EIP-712 types, or a URI for such.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(untagged)]
+pub enum TypesOrURI {
+    URI(String),
+    Object(Types),
+}
+
+/// Object at eip712Domain property of [Ethereum EIP712 Signature 2021](https://uport-project.github.io/ethereum-eip712-signature-2021-spec/#ethereum-eip712-signature-2021) proof object
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+pub struct ProofInfo {
+    #[serde(rename = "messageSchema")]
+    pub types_or_uri: TypesOrURI,
+    pub primary_type: StructName,
+    pub domain: EIP712Value,
+}
+
 #[derive(Error, Debug)]
 pub enum TypedDataConstructionError {
     #[error("Unable to convert document to data set: {0}")]
@@ -95,6 +114,30 @@ pub enum TypedDataConstructionError {
     NormalizeDocument(String),
     #[error("Unable to normalize proof: {0}")]
     NormalizeProof(String),
+}
+
+#[derive(Error, Debug)]
+pub enum TypedDataConstructionJSONError {
+    #[error("Not Implemented")]
+    NotImplemented,
+    #[error("Unable to convert document to JSON: {0}")]
+    DocumentToJSON(String),
+    #[error("Unable to convert proof object to JSON: {0}")]
+    ProofToJSON(String),
+    #[error("Expected document to be a JSON object")]
+    ExpectedDocumentObject,
+    #[error("Expected proof to be a JSON object")]
+    ExpectedProofObject,
+    #[error("Expected eip712Domain in proof object")]
+    ExpectedEip712Domain,
+    #[error("Expected types (messageSchema) in proof.eip712Domain")]
+    ExpectedTypes,
+    #[error("Unable to parse eip712Domain: {0}")]
+    ParseInfo(serde_json::Error),
+    #[error("Unable to convert document to EIP-712 message: {0}")]
+    ConvertMessage(TypedDataParseError),
+    #[error("Unable to dereference EIP-712 types: {0}")]
+    DereferenceTypes(DereferenceTypesError),
 }
 
 #[derive(Error, Debug)]
@@ -131,6 +174,16 @@ pub enum TypedDataHashError {
     IntegerLength(usize),
     #[error("Expected string to be hex bytes")]
     ExpectedHex,
+    #[error("Untyped properties: {0:?}")]
+    UntypedProperties(Vec<String>),
+}
+
+#[derive(Error, Debug)]
+pub enum DereferenceTypesError {
+    #[error("Remote types loading not implemented")]
+    RemoteLoadingNotImplemented,
+    #[error("Unable to convert types from JSON: {0}")]
+    JSON(serde_json::Error),
 }
 
 impl EIP712Value {
@@ -299,6 +352,21 @@ impl Types {
         } else {
             self.types.get(struct_name)
         }
+    }
+}
+
+impl TypesOrURI {
+    async fn dereference(self) -> Result<Types, DereferenceTypesError> {
+        let uri = match self {
+            Self::URI(string) => string,
+            Self::Object(types) => return Ok(types),
+        };
+        let value = match &uri[..] {
+            _ => Err(DereferenceTypesError::RemoteLoadingNotImplemented)?,
+        };
+        let types: Types =
+            serde_json::from_value(value).map_err(|e| DereferenceTypesError::JSON(e))?;
+        Ok(types)
     }
 }
 
@@ -585,13 +653,21 @@ pub fn encode_data(
             let mut enc = Vec::with_capacity(32 * (struct_type.0.len() + 1));
             let type_hash = hash_type(&struct_name, &struct_type, types)?;
             enc.append(&mut type_hash.to_vec());
+            let mut keys: std::collections::HashSet<String> =
+                hash_map.keys().map(|k| k.to_owned()).collect();
             for member in &struct_type.0 {
                 let mut member_enc = match hash_map.get(&member.name) {
                     Some(value) => encode_field(value, &member.type_, types)?,
                     // Allow missing member structs
                     None => EMPTY_32.to_vec(),
                 };
+                keys.remove(&member.name);
                 enc.append(&mut member_enc);
+            }
+            if !keys.is_empty() {
+                // A key was remaining in the data that does not have a type in the struct.
+                let names: Vec<String> = keys.into_iter().collect();
+                return Err(TypedDataHashError::UntypedProperties(names));
             }
             enc
         }
@@ -610,12 +686,16 @@ impl TypedData {
             .map_err(|e| TypedDataConstructionError::DocumentToDataset(e.to_string()))?;
         let doc_dataset_normalized = crate::urdna2015::normalize(&doc_dataset)
             .map_err(|e| TypedDataConstructionError::NormalizeDocument(e.to_string()))?;
+        let mut doc_statements_normalized = doc_dataset_normalized.statements();
+        doc_statements_normalized.sort_by_cached_key(|statement| String::from(statement));
         let sigopts_dataset = proof
             .to_dataset_for_signing(Some(document))
             .await
             .map_err(|e| TypedDataConstructionError::ProofToDataset(e.to_string()))?;
         let sigopts_dataset_normalized = crate::urdna2015::normalize(&sigopts_dataset)
             .map_err(|e| TypedDataConstructionError::NormalizeProof(e.to_string()))?;
+        let mut sigopts_statements_normalized = sigopts_dataset_normalized.statements();
+        sigopts_statements_normalized.sort_by_cached_key(|statement| String::from(statement));
 
         let types = Types {
             eip712_domain: StructType(vec![MemberVariable {
@@ -671,8 +751,7 @@ impl TypedData {
                     (
                         "document".to_string(),
                         EIP712Value::Array(
-                            doc_dataset_normalized
-                                .statements()
+                            doc_statements_normalized
                                 .into_iter()
                                 .map(encode_statement)
                                 .collect(),
@@ -681,8 +760,7 @@ impl TypedData {
                     (
                         "proof".to_string(),
                         EIP712Value::Array(
-                            sigopts_dataset_normalized
-                                .statements()
+                            sigopts_statements_normalized
                                 .into_iter()
                                 .map(encode_statement)
                                 .collect(),
@@ -692,6 +770,49 @@ impl TypedData {
                 .into_iter()
                 .collect::<HashMap<StructName, EIP712Value>>(),
             ),
+        };
+        Ok(typed_data)
+    }
+
+    /// Convert linked data document and proof to TypedData according to
+    /// [EthereumEip712Signature2021](https://uport-project.github.io/ethereum-eip712-signature-2021-spec/)
+    pub async fn from_document_and_options_json(
+        document: &(dyn LinkedDataDocument + Sync),
+        proof: &Proof,
+    ) -> Result<Self, TypedDataConstructionJSONError> {
+        let mut doc_value = document
+            .to_value()
+            .map_err(|e| TypedDataConstructionJSONError::DocumentToJSON(e.to_string()))?;
+        let doc_obj = doc_value
+            .as_object_mut()
+            .ok_or(TypedDataConstructionJSONError::ExpectedDocumentObject)?;
+        let mut proof_value = serde_json::to_value(proof)
+            .map_err(|e| TypedDataConstructionJSONError::ProofToJSON(e.to_string()))?;
+        let proof_obj = proof_value
+            .as_object_mut()
+            .ok_or(TypedDataConstructionJSONError::ExpectedProofObject)?;
+        proof_obj.remove("proofValue");
+        let info = proof_obj
+            .remove("eip712Domain")
+            .ok_or(TypedDataConstructionJSONError::ExpectedEip712Domain)?;
+        let ProofInfo {
+            types_or_uri,
+            primary_type,
+            domain,
+        } = serde_json::from_value(info)
+            .map_err(|e| TypedDataConstructionJSONError::ParseInfo(e))?;
+        doc_obj.insert("proof".to_string(), proof_value);
+        let message = EIP712Value::try_from(doc_value)
+            .map_err(|e| TypedDataConstructionJSONError::ConvertMessage(e))?;
+        let types = types_or_uri
+            .dereference()
+            .await
+            .map_err(|e| TypedDataConstructionJSONError::DereferenceTypes(e))?;
+        let typed_data = Self {
+            types,
+            primary_type,
+            domain,
+            message,
         };
         Ok(typed_data)
     }
@@ -944,5 +1065,310 @@ mod tests {
             bytes_to_lowerhex(&hash),
             "0x3128ae562d7141585a21f9c04e87520857ae9025d5c57293255f25d72f869b2e"
         );
+    }
+
+    pub struct DIDExample;
+    use crate::did::{DIDMethod, Document};
+    use crate::did_resolve::{
+        DIDResolver, DocumentMetadata, ResolutionInputMetadata, ResolutionMetadata,
+        ERROR_NOT_FOUND, TYPE_DID_LD_JSON,
+    };
+    use async_trait::async_trait;
+    const DOC_JSON: &'static str = r#"
+{
+  "@context": "https://www.w3.org/ns/did/v1",
+  "id": "did:example:aaaabbbb",
+  "verificationMethod": [
+    {
+      "id": "did:example:aaaabbbb#issuerKey-1",
+      "type": "EcdsaSecp256k1VerificationKey2019",
+      "controller": "did:example:aaaabbbb",
+      "publicKeyJwk": {
+        "kty": "EC",
+        "crv": "secp256k1",
+        "x": "cmbYyDC6cbm807_OmFNYP4CLEL0aB2F1UG683SxFkXM",
+        "y": "zBw5HAh0cJM4YimSQvtYM1HFhzUXVUgrDhxJ70aajt0"
+      }
+    }
+  ],
+  "assertionMethod": [
+    "did:example:aaaabbbb#issuerKey-1"
+  ],
+  "authentication": [
+    "did:example:aaaabbbb#issuerKey-1"
+  ]
+}
+    "#;
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl DIDMethod for DIDExample {
+        fn name(&self) -> &'static str {
+            return "example";
+        }
+        fn to_resolver(&self) -> &dyn DIDResolver {
+            self
+        }
+    }
+    #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+    #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
+    impl DIDResolver for DIDExample {
+        async fn resolve(
+            &self,
+            did: &str,
+            _input_metadata: &ResolutionInputMetadata,
+        ) -> (
+            ResolutionMetadata,
+            Option<Document>,
+            Option<DocumentMetadata>,
+        ) {
+            if did != "did:example:aaaabbbb" {
+                return (ResolutionMetadata::from_error(ERROR_NOT_FOUND), None, None);
+            }
+            let doc: Document = match serde_json::from_str(DOC_JSON) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    return (ResolutionMetadata::from_error(&err.to_string()), None, None);
+                }
+            };
+            (
+                // ResolutionMetadata::default(),
+                // Note: remove content type when https://github.com/spruceid/ssi/pull/224 is
+                // merged
+                ResolutionMetadata {
+                    content_type: Some(TYPE_DID_LD_JSON.to_string()),
+                    ..Default::default()
+                },
+                Some(doc),
+                Some(DocumentMetadata::default()),
+            )
+        }
+    }
+
+    #[async_std::test]
+    async fn verify_typed_data() {
+        let proof: Proof = serde_json::from_value(json!({
+          "verificationMethod": "did:example:aaaabbbb#issuerKey-1",
+          "created": "2021-07-09T19:47:41Z",
+          "proofPurpose": "assertionMethod",
+          "type": "EthereumEip712Signature2021",
+          "eip712Domain": {
+            "messageSchema": {
+              "EIP712Domain": [
+                { "name": "name", "type": "string" },
+                { "name": "version", "type": "string" },
+                { "name": "chainId", "type": "uint256" },
+                { "name": "salt", "type": "bytes32" }
+              ],
+              "VerifiableCredential": [
+                { "name": "@context", "type": "string[]" },
+                { "name": "type", "type": "string[]" },
+                { "name": "id", "type": "string" },
+                { "name": "issuer", "type": "string" },
+                { "name": "issuanceDate", "type": "string" },
+                { "name": "credentialSubject", "type": "CredentialSubject" },
+                { "name": "credentialSchema", "type": "CredentialSchema" },
+                { "name": "proof", "type": "Proof" }
+              ],
+              "CredentialSchema": [
+                { "name": "id", "type": "string" },
+                { "name": "type", "type": "string" }
+              ],
+              "CredentialSubject": [
+                { "name": "type", "type": "string" },
+                { "name": "id", "type": "string" },
+                { "name": "name", "type": "string" },
+                { "name": "child", "type": "Person" }
+              ],
+              "Person": [
+                { "name": "type", "type": "string" },
+                { "name": "name", "type": "string" }
+              ],
+              "Proof": [
+                { "name": "verificationMethod", "type": "string" },
+                { "name": "created", "type": "string" },
+                { "name": "proofPurpose", "type": "string" },
+                { "name": "type", "type": "string" }
+              ]
+            },
+            "primaryType": "VerifiableCredential",
+            "domain": {
+              "name": "https://example.com",
+              "version": "2",
+              "chainId": 4,
+              "salt": "0x000000000000000000000000000000000000000000000000aaaabbbbccccdddd"
+            }
+          }
+        }))
+        .unwrap();
+        let vc: crate::vc::Credential = serde_json::from_value(json!({
+          "@context": [
+            "https://www.w3.org/2018/credentials/v1",
+            "https://schema.org"
+          ],
+          "type": [
+            "VerifiableCredential"
+          ],
+          "id": "https://example.org/person/1234",
+          "issuer": "did:example:aaaabbbb",
+          "issuanceDate": "2010-01-01T19:23:24Z",
+          "credentialSubject": {
+            "type": "Person",
+            "id": "did:example:bbbbaaaa",
+            "name": "Vitalik",
+            "child": {
+              "type": "Person",
+              "name": "Ethereum"
+            }
+          },
+          "credentialSchema": {
+            "id": "https://example.com/schemas/v1",
+            "type": "Eip712SchemaValidator2021"
+          }
+        }))
+        .unwrap();
+        let typed_data = TypedData::from_document_and_options_json(&vc, &proof)
+            .await
+            .unwrap();
+        // https://uport-project.github.io/ethereum-eip712-signature-2021-spec/#example-4
+        let expected_typed_data = json!({
+          "types": {
+            "EIP712Domain": [
+              { "name": "name", "type": "string" },
+              { "name": "version", "type": "string" },
+              { "name": "chainId", "type": "uint256" },
+              { "name": "salt", "type": "bytes32" }
+            ],
+            "VerifiableCredential": [
+              { "name": "@context", "type": "string[]" },
+              { "name": "type", "type": "string[]" },
+              { "name": "id", "type": "string" },
+              { "name": "issuer", "type": "string" },
+              { "name": "issuanceDate", "type": "string" },
+              { "name": "credentialSubject", "type": "CredentialSubject" },
+              { "name": "credentialSchema", "type": "CredentialSchema" },
+              { "name": "proof", "type": "Proof" }
+            ],
+            "CredentialSchema": [
+              { "name": "id", "type": "string" },
+              { "name": "type", "type": "string" }
+            ],
+            "CredentialSubject": [
+              { "name": "type", "type": "string" },
+              { "name": "id", "type": "string" },
+              { "name": "name", "type": "string" },
+              { "name": "child", "type": "Person" }
+            ],
+            "Person": [
+              { "name": "type", "type": "string" },
+              { "name": "name", "type": "string" }
+            ],
+            "Proof": [
+              { "name": "verificationMethod", "type": "string" },
+              { "name": "created", "type": "string" },
+              { "name": "proofPurpose", "type": "string" },
+              { "name": "type", "type": "string" }
+            ]
+          },
+          "domain": {
+            "name": "https://example.com",
+            "version": "2",
+            "chainId": 4,
+            "salt": "0x000000000000000000000000000000000000000000000000aaaabbbbccccdddd"
+          },
+          "primaryType": "VerifiableCredential",
+          "message": {
+            "@context": [
+              "https://www.w3.org/2018/credentials/v1",
+              "https://schema.org"
+            ],
+            "type": [
+              "VerifiableCredential"
+            ],
+            "id": "https://example.org/person/1234",
+            "issuer": "did:example:aaaabbbb",
+            "issuanceDate": "2010-01-01T19:23:24Z",
+            "credentialSubject": {
+              "type": "Person",
+              "id": "did:example:bbbbaaaa",
+              "name": "Vitalik",
+              "child": {
+                "type": "Person",
+                "name": "Ethereum"
+              }
+            },
+            "credentialSchema": {
+              "id": "https://example.com/schemas/v1",
+              "type": "Eip712SchemaValidator2021"
+            },
+            "proof": {
+              "verificationMethod": "did:example:aaaabbbb#issuerKey-1",
+              "created": "2021-07-09T19:47:41Z",
+              "proofPurpose": "assertionMethod",
+              "type": "EthereumEip712Signature2021"
+            }
+          }
+        });
+        assert_eq!(
+            serde_json::to_value(&typed_data).unwrap(),
+            expected_typed_data
+        );
+
+        let jwk: crate::jwk::JWK = serde_json::from_value(json!({
+            "kty": "EC",
+            "crv": "secp256k1",
+            "x": "cmbYyDC6cbm807_OmFNYP4CLEL0aB2F1UG683SxFkXM",
+            "y": "zBw5HAh0cJM4YimSQvtYM1HFhzUXVUgrDhxJ70aajt0",
+            "d": "u7QuEl6W0XNppEY0iMVjATT99tC9acwV3Z2keEqvKGo"
+        }))
+        .unwrap();
+        eprintln!("jwk {}", serde_json::to_string(&jwk).unwrap());
+
+        let td_jcs = serde_jcs::to_string(&typed_data).unwrap();
+        // Wrap string with line breaks
+        // https://stackoverflow.com/a/57032118
+        let jcs_lines = td_jcs
+            .chars()
+            .enumerate()
+            .flat_map(|(i, c)| {
+                if i != 0 && i % 90 == 0 {
+                    Some('\n')
+                } else {
+                    None
+                }
+                .into_iter()
+                .chain(std::iter::once(c))
+            })
+            .collect::<String>();
+        eprintln!("JCS: [\n{}\n]", jcs_lines);
+
+        // Sign proof
+        use crate::ldp::ProofSuite;
+        let bytes = typed_data.bytes().unwrap();
+        let ec_params = match &jwk.params {
+            crate::jwk::Params::EC(ec) => ec,
+            _ => unreachable!(),
+        };
+        use k256::ecdsa::signature::Signer;
+        let secret_key = k256::SecretKey::try_from(ec_params).unwrap();
+        let signing_key = k256::ecdsa::SigningKey::from(secret_key);
+        let sig: k256::ecdsa::recoverable::Signature = signing_key.try_sign(&bytes).unwrap();
+        let sig_bytes = &mut sig.as_ref().to_vec();
+        // Recovery ID starts at 27 instead of 0.
+        sig_bytes[64] = sig_bytes[64] + 27;
+        let sig_hex = crate::keccak_hash::bytes_to_lowerhex(sig_bytes);
+        let mut proof = proof.clone();
+        proof.proof_value = Some(sig_hex.clone());
+        eprintln!("proof {}", serde_json::to_string(&proof).unwrap());
+
+        // Verify the VC/proof
+        let mut vc = vc.clone();
+        vc.add_proof(proof.clone());
+        vc.validate().unwrap();
+        let verification_result = vc.verify(None, &DIDExample).await;
+        println!("{:#?}", verification_result);
+        assert!(verification_result.errors.is_empty());
+
+        assert_eq!(sig_hex, "0x5fb8f18f21f54c2df8a2720d0afcee7dbbb18e4b7a22ce6e8183633d63b076d329122584db769cd78b6cd5a7094ede5ceaa43317907539187f1f0d8875f99e051b");
+        // todo!();
     }
 }
