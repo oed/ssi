@@ -471,6 +471,14 @@ impl TryFrom<String> for URI {
     }
 }
 
+impl URI {
+    fn as_str(self: &Self) -> &str {
+        match self {
+            URI::String(string) => string.as_str(),
+        }
+    }
+}
+
 impl FromStr for URI {
     type Err = Error;
     fn from_str(uri: &str) -> Result<Self, Self::Err> {
@@ -571,6 +579,65 @@ fn jwt_encode(claims: &JWTClaims, keys: &JWTKeys) -> Result<String, Error> {
     };
     let algorithm = jwk.get_algorithm().ok_or(Error::MissingAlgorithm)?;
     Ok(crate::jwt::encode_sign(algorithm, claims, &jwk)?)
+}
+
+// Ensure a verification relationship exists between a given issuer and verification method for a
+// given proof purpose, and that the given JWK is matches the given verification method.
+pub(crate) async fn ensure_verification_relationship(
+    issuer: &str,
+    proof_purpose: ProofPurpose,
+    vm: &str,
+    jwk: &JWK,
+    resolver: &dyn DIDResolver,
+) -> Result<(), Error> {
+    let vmms =
+        crate::did_resolve::get_verification_methods(issuer, proof_purpose.clone(), resolver)
+            .await?;
+    let vmm = vmms.get(vm).ok_or_else(|| {
+        Error::MissingVerificationRelationship(issuer.to_string(), proof_purpose, vm.to_string())
+    })?;
+    vmm.match_jwk(&jwk)?;
+    Ok(())
+}
+
+pub(crate) async fn pick_default_vm(
+    issuer: &str,
+    proof_purpose: ProofPurpose,
+    jwk: &JWK,
+    resolver: &dyn DIDResolver,
+) -> Result<String, Error> {
+    let vm_ids =
+        crate::did_resolve::get_verification_methods(issuer, proof_purpose.clone(), resolver)
+            .await?;
+    let mut err = Error::MissingKey;
+    for (vm_id, vmm) in vm_ids {
+        // Try to find a VM that matches this JWK and controller.
+        match vmm.match_jwk(&jwk) {
+            Ok(()) => {
+                // Found appropriate VM.
+                return Ok(vm_id.to_string());
+            }
+            Err(e) => err = e,
+        }
+    }
+    // No matching VM found. Return any error encountered.
+    Err(err)
+}
+
+impl Issuer {
+    /// Return this issuer's id
+    pub fn get_id(&self) -> String {
+        match self {
+            Self::URI(uri) => uri.to_string(),
+            Self::Object(object_with_id) => object_with_id.id.to_string(),
+        }
+    }
+    pub fn get_id_ref(&self) -> &str {
+        match self {
+            Self::URI(uri) => uri.as_str(),
+            Self::Object(object_with_id) => object_with_id.id.as_str(),
+        }
+    }
 }
 
 impl Credential {
@@ -722,8 +789,14 @@ impl Credential {
         &self,
         jwk: Option<&JWK>,
         options: &LinkedDataProofOptions,
-        _resolver: &dyn DIDResolver,
+        resolver: &dyn DIDResolver,
     ) -> Result<String, Error> {
+        let mut options = options.clone();
+        if let Some(jwk) = jwk {
+            crate::ldp::ensure_or_pick_verification_relationship(&mut options, self, jwk, resolver)
+                .await?;
+            // If no JWK is passed, there is no verification relationship.
+        }
         let LinkedDataProofOptions {
             verification_method,
             proof_purpose,
@@ -764,6 +837,7 @@ impl Credential {
         } else {
             crate::jwk::Algorithm::None
         };
+        // Ensure consistency between key ID and verification method URI.
         let key_id = match (
             jwk.and_then(|jwk| jwk.key_id.clone()),
             verification_method.to_owned(),
@@ -776,7 +850,6 @@ impl Credential {
                 return Err(Error::KeyIdVMMismatch(vm_id.to_string(), jwk_kid))
             }
         };
-        // TODO: use resolver to pick a default key id
         let header = Header {
             algorithm,
             key_id,
@@ -1108,6 +1181,17 @@ impl LinkedDataDocument for Credential {
     fn to_value(&self) -> Result<Value, Error> {
         Ok(serde_json::to_value(&self)?)
     }
+
+    fn get_issuer(&self) -> Option<&str> {
+        match self.issuer {
+            Some(ref issuer) => Some(issuer.get_id_ref()),
+            None => None,
+        }
+    }
+
+    fn get_default_proof_purpose(&self) -> Option<ProofPurpose> {
+        Some(ProofPurpose::AssertionMethod)
+    }
 }
 
 impl Presentation {
@@ -1167,8 +1251,14 @@ impl Presentation {
         &self,
         jwk: Option<&JWK>,
         options: &LinkedDataProofOptions,
-        _resolver: &dyn DIDResolver,
+        resolver: &dyn DIDResolver,
     ) -> Result<String, Error> {
+        let mut options = options.clone();
+        if let Some(jwk) = jwk {
+            crate::ldp::ensure_or_pick_verification_relationship(&mut options, self, jwk, resolver)
+                .await?;
+            // If no JWK is passed, there is no verification relationship.
+        }
         let LinkedDataProofOptions {
             verification_method,
             proof_purpose,
@@ -1221,7 +1311,6 @@ impl Presentation {
                 return Err(Error::KeyIdVMMismatch(vm_id.to_string(), jwk_kid))
             }
         };
-        // TODO: use resolver to pick a default key id
         let header = Header {
             algorithm,
             key_id,
@@ -1578,6 +1667,17 @@ impl LinkedDataDocument for Presentation {
 
     fn to_value(&self) -> Result<Value, Error> {
         Ok(serde_json::to_value(&self)?)
+    }
+
+    fn get_issuer(&self) -> Option<&str> {
+        match self.holder {
+            Some(ref holder) => Some(holder.as_str()),
+            None => None,
+        }
+    }
+
+    fn get_default_proof_purpose(&self) -> Option<ProofPurpose> {
+        Some(ProofPurpose::Authentication)
     }
 }
 
@@ -2004,9 +2104,8 @@ mod tests {
             ],
             "id": "http://example.org/credentials/192783",
             "type": "VerifiableCredential",
-            "issuer": "https://example.org/issuers/1345",
+            "issuer": "did:example:foo",
             "issuanceDate": "2020-08-25T11:26:53Z",
-            "expirationDate": "2021-08-25T00:00:00Z",
             "credentialSubject": {
                 "id": "did:example:a6c78986cc36418b95a22d7f736",
                 "spouse": "Example Person"
@@ -2028,6 +2127,12 @@ mod tests {
             .await
             .unwrap();
         println!("{:?}", signed_jwt);
+
+        let (vc_opt, verification_result) =
+            Credential::decode_verify_jwt(&signed_jwt, Some(options.clone()), &DIDExample).await;
+        println!("{:#?}", verification_result);
+        let vc = vc_opt.unwrap();
+        assert_eq!(verification_result.errors.len(), 0);
     }
 
     #[async_std::test]
@@ -2041,7 +2146,7 @@ mod tests {
             ],
             "id": "http://example.org/credentials/192783",
             "type": "VerifiableCredential",
-            "issuer": "https://example.org/issuers/1345",
+            "issuer": "did:example:foo",
             "issuanceDate": "2020-08-25T11:26:53Z",
             "credentialSubject": {
                 "id": "did:example:a6c78986cc36418b95a22d7f736",
@@ -2229,9 +2334,11 @@ mod tests {
         let key: JWK = serde_json::from_str(JWK_JSON).unwrap();
 
         let mut issue_options = LinkedDataProofOptions::default();
+        issue_options.proof_purpose = Some(ProofPurpose::AssertionMethod);
         issue_options.verification_method = Some(URI::String("did:example:foo#key1".to_string()));
         let algorithm = key.get_algorithm().unwrap();
         let public_key = key.to_public();
+
         let preparation = vc
             .prepare_proof(&public_key, &issue_options, &DIDExample)
             .await
@@ -2492,6 +2599,7 @@ _:c14n0 <https://w3id.org/security#verificationMethod> <https://example.org/foo/
         let vc_issuer_vm = "did:example:foo#key1".to_string();
         vc.issuer = Some(Issuer::URI(URI::String(vc_issuer_key.to_string())));
         vc_issue_options.verification_method = Some(URI::String(vc_issuer_vm));
+        vc_issue_options.proof_purpose = Some(ProofPurpose::AssertionMethod);
         vc_issue_options.checks = None;
         let vc_proof = vc
             .generate_proof(&key, &vc_issue_options, &DIDExample)
