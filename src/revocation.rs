@@ -13,8 +13,9 @@ use thiserror::Error;
 
 type URL = String;
 
-/// Minimum size of a revocation list bitstring, in bytes
-pub const MIN_BITSTRING_SIZE_BYTES: usize = 16384;
+/// Minimum length of a revocation list bitstring
+/// <https://w3c-ccg.github.io/vc-status-rl-2020/#revocation-bitstring-length>
+pub const MIN_BITSTRING_LENGTH: usize = 131072;
 
 const EMPTY_RLIST: &str = "H4sIAAAAAAAA_-3AMQEAAADCoPVPbQwfKAAAAAAAAAAAAAAAAAAAAOBthtJUqwBAAAA";
 
@@ -100,11 +101,11 @@ pub enum SetStatusError {
     Encode(#[from] EncodeListError),
     #[error("Decode list: {0}")]
     Decode(#[from] DecodeListError),
-    #[error("Out of bounds: index {0} but length is {1}")]
+    #[error("Out of bounds: bitstring index {0} but length is {1}")]
     OutOfBounds(usize, usize),
-    #[error("Revocation list too large for BitVec: {0}")]
+    #[error("Revocation list bitstring is too large for BitVec: {0}")]
     ListTooLarge(usize),
-    #[error("Revocation list is too small: {0}. Minimum: {1}")]
+    #[error("Revocation list bitstring is too small: {0}. Minimum: {1}")]
     ListTooSmall(usize, usize),
 }
 
@@ -112,19 +113,19 @@ impl RevocationList2020 {
     /// Set the revocation status for a given index in the list.
     pub fn set_status(&mut self, index: usize, revoked: bool) -> Result<(), SetStatusError> {
         let mut list = List::try_from(&self.encoded_list)?;
-        let byte_len = list.0.len();
-        if byte_len < MIN_BITSTRING_SIZE_BYTES {
+        let bitstring_len = list.0.len() * 8;
+        let mut bitstring = BitVec::<Lsb0, u8>::try_from_vec(list.0)
+            .map_err(|_| SetStatusError::ListTooLarge(bitstring_len))?;
+        if bitstring_len < MIN_BITSTRING_LENGTH {
             return Err(SetStatusError::ListTooSmall(
-                byte_len * 8,
-                MIN_BITSTRING_SIZE_BYTES,
+                bitstring_len,
+                MIN_BITSTRING_LENGTH,
             ));
         }
-        let mut bitstring = BitVec::<Lsb0, u8>::try_from_vec(list.0)
-            .map_err(|_| SetStatusError::ListTooLarge(byte_len * 8))?;
         if let Some(mut bitref) = bitstring.get_mut(index) {
             *bitref = revoked;
         } else {
-            return Err(SetStatusError::OutOfBounds(index, byte_len * 8));
+            return Err(SetStatusError::OutOfBounds(index, bitstring_len));
         }
         list.0 = bitstring.into_vec();
         self.encoded_list = EncodedList::try_from(&list)?;
@@ -135,8 +136,8 @@ impl RevocationList2020 {
 #[derive(Error, Debug)]
 pub enum ListIterDecodeError {
     #[error("Unable to reference indexes: {0}")]
-    ListTooLarge(#[from] bitvec::ptr::BitSpanError<u8>),
-    #[error("Revocation list is too small: {0}. Minimum: {1}")]
+    BitSpan(#[from] bitvec::ptr::BitSpanError<u8>),
+    #[error("Revocation list bitstring is too small: {0}. Minimum: {1}")]
     ListTooSmall(usize, usize),
 }
 
@@ -145,13 +146,13 @@ impl List {
     pub fn iter_revoked_indexes(
         &self,
     ) -> Result<bitvec::slice::IterOnes<Lsb0, u8>, ListIterDecodeError> {
-        if self.0.len() < MIN_BITSTRING_SIZE_BYTES {
+        let bitstring = BitSlice::<Lsb0, u8>::from_slice(&self.0[..])?;
+        if bitstring.len() < MIN_BITSTRING_LENGTH {
             return Err(ListIterDecodeError::ListTooSmall(
-                self.0.len() * 8,
-                MIN_BITSTRING_SIZE_BYTES,
+                bitstring.len(),
+                MIN_BITSTRING_LENGTH,
             ));
         }
-        let bitstring = BitSlice::<Lsb0, u8>::from_slice(&self.0[..])?;
         Ok(bitstring.iter_ones())
     }
 }
@@ -452,7 +453,7 @@ mod tests {
     use super::*;
     #[test]
     fn default_list() {
-        let list = List(vec![0; MIN_BITSTRING_SIZE_BYTES]);
+        let list = List(vec![0; MIN_BITSTRING_LENGTH / 8]);
         let revoked_indexes = list.iter_revoked_indexes().unwrap().collect::<Vec<usize>>();
         let empty: Vec<usize> = Vec::new();
         assert_eq!(revoked_indexes, empty);
