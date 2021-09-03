@@ -222,6 +222,16 @@ impl CredentialStatus for RevocationList2020Status {
                 return result.with_error("Credential is missing issuer".to_string());
             }
         };
+        if !credential
+            .context
+            .contains_uri(REVOCATION_LIST_2020_V1_CONTEXT)
+        {
+            // TODO: support JSON-LD credentials defining the terms elsewhere.
+            return result.with_error(format!(
+                "Missing expected context URI {} for RevocationList2020",
+                REVOCATION_LIST_2020_V1_CONTEXT
+            ));
+        }
         if self.id == URI::String(self.revocation_list_credential.clone()) {
             return result.with_error(format!(
                 "Expected revocationListCredential to be different from status id: {}",
